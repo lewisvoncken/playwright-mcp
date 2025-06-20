@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import os from 'node:os';
+import process from 'node:process';
 
 import debug from 'debug';
 import * as playwright from 'playwright';
@@ -116,7 +117,23 @@ class IsolatedContextFactory extends BaseContextFactory {
   }
 
   protected override async _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext> {
-    return browser.newContext(this.browserConfig.contextOptions);
+    const contextOptions = { ...this.browserConfig.contextOptions };
+    
+    // Configure video recording directory if enabled
+    if (contextOptions.recordVideo) {
+      const videosDir = path.join(
+        process.cwd(),
+        'test-results',
+        `videos-${Date.now()}`
+      );
+      await fs.promises.mkdir(videosDir, { recursive: true });
+      contextOptions.recordVideo = {
+        ...contextOptions.recordVideo,
+        dir: videosDir,
+      };
+    }
+    
+    return browser.newContext(contextOptions);
   }
 }
 
@@ -130,7 +147,26 @@ class CdpContextFactory extends BaseContextFactory {
   }
 
   protected override async _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext> {
-    return this.browserConfig.isolated ? await browser.newContext() : browser.contexts()[0];
+    if (this.browserConfig.isolated) {
+      const contextOptions = { ...this.browserConfig.contextOptions };
+      
+      // Configure video recording directory if enabled
+      if (contextOptions.recordVideo) {
+        const videosDir = path.join(
+          process.cwd(),
+          'test-results',
+          `videos-${Date.now()}`
+        );
+        await fs.promises.mkdir(videosDir, { recursive: true });
+        contextOptions.recordVideo = {
+          ...contextOptions.recordVideo,
+          dir: videosDir,
+        };
+      }
+      
+      return await browser.newContext(contextOptions);
+    }
+    return browser.contexts()[0];
   }
 }
 
@@ -148,7 +184,23 @@ class RemoteContextFactory extends BaseContextFactory {
   }
 
   protected override async _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext> {
-    return browser.newContext();
+    const contextOptions = { ...this.browserConfig.contextOptions };
+    
+    // Configure video recording directory if enabled
+    if (contextOptions.recordVideo) {
+      const videosDir = path.join(
+        process.cwd(),
+        'test-results',
+        `videos-${Date.now()}`
+      );
+      await fs.promises.mkdir(videosDir, { recursive: true });
+      contextOptions.recordVideo = {
+        ...contextOptions.recordVideo,
+        dir: videosDir,
+      };
+    }
+    
+    return browser.newContext(contextOptions);
   }
 }
 
@@ -168,12 +220,27 @@ class PersistentContextFactory implements BrowserContextFactory {
     this._userDataDirs.add(userDataDir);
     testDebug('lock user data dir', userDataDir);
 
+    // Configure context options with video recording if enabled
+    const contextOptions = { ...this.browserConfig.contextOptions };
+    if (contextOptions.recordVideo) {
+      const videosDir = path.join(
+        process.cwd(),
+        'test-results',
+        `videos-${Date.now()}`
+      );
+      await fs.promises.mkdir(videosDir, { recursive: true });
+      contextOptions.recordVideo = {
+        ...contextOptions.recordVideo,
+        dir: videosDir,
+      };
+    }
+
     const browserType = playwright[this.browserConfig.browserName];
     for (let i = 0; i < 5; i++) {
       try {
         const browserContext = await browserType.launchPersistentContext(userDataDir, {
           ...this.browserConfig.launchOptions,
-          ...this.browserConfig.contextOptions,
+          ...contextOptions,
           handleSIGINT: false,
           handleSIGTERM: false,
         });
@@ -239,7 +306,26 @@ export class BrowserServerContextFactory extends BaseContextFactory {
   }
 
   protected override async _doCreateContext(browser: playwright.Browser): Promise<playwright.BrowserContext> {
-    return this.browserConfig.isolated ? await browser.newContext() : browser.contexts()[0];
+    if (this.browserConfig.isolated) {
+      const contextOptions = { ...this.browserConfig.contextOptions };
+      
+      // Configure video recording directory if enabled
+      if (contextOptions.recordVideo) {
+        const videosDir = path.join(
+          process.cwd(),
+          'test-results',
+          `videos-${Date.now()}`
+        );
+        await fs.promises.mkdir(videosDir, { recursive: true });
+        contextOptions.recordVideo = {
+          ...contextOptions.recordVideo,
+          dir: videosDir,
+        };
+      }
+      
+      return await browser.newContext(contextOptions);
+    }
+    return browser.contexts()[0];
   }
 
   private async _createUserDataDir() {
