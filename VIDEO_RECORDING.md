@@ -41,6 +41,115 @@ test-results/
 │   └── video-page-2.webm
 ```
 
+## Video Recording Tools
+
+The MCP server now includes dedicated video recording tools that allow fine-grained control over video capture:
+
+### `browser_video_start`
+Start recording a video of browser interactions.
+
+**Parameters:**
+- `filename` (optional): Custom filename for the video
+- `width` (optional): Video width in pixels (default: 1280)
+- `height` (optional): Video height in pixels (default: 720)
+
+**Example:**
+```json
+{
+  "name": "browser_video_start",
+  "arguments": {
+    "filename": "my-recording.webm",
+    "width": 1920,
+    "height": 1080
+  }
+}
+```
+
+### `browser_video_stop`
+Stop the current video recording and optionally return the video content.
+
+**Parameters:**
+- `returnVideo` (optional): Whether to include video content in response (default: true)
+
+**Example:**
+```json
+{
+  "name": "browser_video_stop",
+  "arguments": {
+    "returnVideo": true
+  }
+}
+```
+
+### `browser_video_status`
+Check if video recording is currently active and get recording details.
+
+**Example:**
+```json
+{
+  "name": "browser_video_status"
+}
+```
+
+### `browser_video_get`
+Retrieve a previously recorded video file.
+
+**Parameters:**
+- `filename`: Name of the video file to retrieve
+- `returnContent` (optional): Whether to include video content in response (default: true)
+
+**Example:**
+```json
+{
+  "name": "browser_video_get",
+  "arguments": {
+    "filename": "my-recording.webm",
+    "returnContent": true
+  }
+}
+```
+
+## Video Content in MCP Responses
+
+### Direct Video Return
+
+Videos can be returned directly in MCP responses as base64-encoded content:
+
+```json
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "Video recording stopped. Duration: 30s. Saved to video-2024-01-01.webm"
+    },
+    {
+      "type": "resource",
+      "data": "base64-encoded-video-content...",
+      "mimeType": "video/webm",
+      "uri": "file:///path/to/video-2024-01-01.webm"
+    }
+  ]
+}
+```
+
+### Client Support Detection
+
+The server automatically detects client support for video content:
+- **Supported clients**: Will receive video content directly in responses
+- **Unsupported clients**: Will receive file path information only
+
+### Streaming Considerations
+
+**Advantages of Direct Return:**
+- ✅ Immediate access to video content
+- ✅ No additional file serving infrastructure needed
+- ✅ Works with any MCP transport (stdio, SSE, HTTP)
+
+**Considerations:**
+- ⚠️ Large videos may impact response size
+- ⚠️ Base64 encoding increases payload by ~33%
+- ⚠️ Memory usage during encoding
+
 ## Playwright Test Configuration
 
 The video recording is also configured in `playwright.config.ts` for running tests with `npm test`:
@@ -144,6 +253,34 @@ node cli.js --headless --video-mode=on
 node cli.js --browser=firefox --video-mode=on
 ```
 
+### Using Video Tools Programmatically
+
+```javascript
+// Start recording
+await client.callTool({
+  name: 'browser_video_start',
+  arguments: {
+    filename: 'user-session.webm',
+    width: 1920,
+    height: 1080
+  }
+});
+
+// Perform browser interactions...
+await client.callTool({
+  name: 'browser_navigate',
+  arguments: { url: 'https://example.com' }
+});
+
+// Stop recording and get video
+const result = await client.callTool({
+  name: 'browser_video_stop',
+  arguments: { returnVideo: true }
+});
+
+// The result.content will include the video as base64
+```
+
 ### Running Tests with Video Recording
 
 ```bash
@@ -192,6 +329,7 @@ When using with MCP clients (like Claude Desktop), add video recording options:
 2. **Navigate to the timestamped folder**
 3. **Open `.webm` files** in any modern browser or video player
 4. **Videos show exact browser interactions** during MCP tool execution
+5. **If returned in MCP response**, decode the base64 content and save as `.webm`
 
 ## Troubleshooting
 
@@ -199,6 +337,7 @@ When using with MCP clients (like Claude Desktop), add video recording options:
 - Use smaller video dimensions: `--video-size=1024,768`
 - Consider using `retain-on-failure` mode
 - Monitor disk space usage
+- For MCP responses, consider using `returnVideo: false` for large recordings
 
 ### Missing Videos
 - Ensure video recording is enabled with `--video-mode=on` or `--video-mode=retain-on-failure`
@@ -206,10 +345,16 @@ When using with MCP clients (like Claude Desktop), add video recording options:
 - Verify sufficient disk space is available
 - Check the `test-results/` directory for timestamped video folders
 
+### Video Content Not Returned
+- Check if client supports video content (some clients may not)
+- Verify video file exists and is readable
+- Check file size (very large videos may timeout)
+
 ### Performance Impact
 - Video recording adds minimal overhead to MCP operations
 - File I/O occurs during browser interactions
 - Consider disabling for performance-critical automations
+- Base64 encoding happens only when returning content
 
 ### Permission Issues
 - Ensure write permissions for the output directory
@@ -234,5 +379,23 @@ node cli.js --video-mode=retain-on-failure --video-size=1280,720 --headless
 # Disable recording for performance
 node cli.js --video-mode=off
 ```
+
+## Advanced Features
+
+### Programmatic Video Control
+- Start/stop recording on demand via MCP tools
+- Retrieve specific video files by name
+- Control video quality and resolution per recording
+- Check recording status and duration
+
+### Multiple Recording Sessions
+- Each `browser_video_start` creates a new context
+- Multiple videos can be recorded sequentially
+- Automatic cleanup of video contexts on stop
+
+### Video Format Support
+- Primary format: WebM (`.webm`)
+- Compatible with all major browsers and players
+- Optimal compression for web delivery
 
 The video recording is now fully integrated into both the MCP server operations and the test suite, providing comprehensive debugging capabilities for browser automation workflows!
