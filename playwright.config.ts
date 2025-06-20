@@ -25,20 +25,92 @@ export default defineConfig<TestOptions>({
   retries: process.env.CI ? 2 : 0,
   workers: process.env.CI ? 1 : undefined,
   reporter: 'list',
+  // Global video configuration
+  use: {
+    // Record video for failed tests only by default
+    video: 'retain-on-failure',
+    // Alternatively, you can use:
+    // video: 'on' to record all tests
+    // video: 'off' to disable video recording
+    // video: 'retain-on-failure' to keep videos only for failed tests
+    
+    // Optional: Configure video size and quality
+    // videoSize: { width: 1280, height: 720 },
+    // videoQuality: 'low', // 'low', 'high' - affects file size and quality
+  },
   projects: [
-    { name: 'chrome' },
-    { name: 'msedge', use: { mcpBrowser: 'msedge' } },
-    { name: 'chromium', use: { mcpBrowser: 'chromium' } },
+    { 
+      name: 'chrome',
+      use: {
+        // Project-specific video settings can override global settings
+        video: {
+          mode: 'retain-on-failure',
+          size: { width: 1280, height: 720 }
+        }
+      }
+    },
+    { 
+      name: 'msedge', 
+      use: { 
+        mcpBrowser: 'msedge',
+        video: {
+          mode: 'retain-on-failure',
+          size: { width: 1280, height: 720 }
+        }
+      } 
+    },
+    { 
+      name: 'chromium', 
+      use: { 
+        mcpBrowser: 'chromium',
+        video: {
+          mode: 'retain-on-failure',
+          size: { width: 1280, height: 720 }
+        }
+      } 
+    },
     ...process.env.MCP_IN_DOCKER ? [{
       name: 'chromium-docker',
       grep: /browser_navigate|browser_click/,
       use: {
         mcpBrowser: 'chromium',
-        mcpMode: 'docker' as const
+        mcpMode: 'docker' as const,
+        video: {
+          mode: 'retain-on-failure',
+          size: { width: 1280, height: 720 }
+        }
       }
     }] : [],
-    { name: 'firefox', use: { mcpBrowser: 'firefox' } },
-    { name: 'webkit', use: { mcpBrowser: 'webkit' } },
-    { name: 'chromium-extension', use: { mcpBrowser: 'chromium', mcpMode: 'extension' } },
+    { 
+      name: 'firefox', 
+      use: { 
+        mcpBrowser: 'firefox',
+        video: {
+          mode: 'retain-on-failure',
+          size: { width: 1280, height: 720 }
+        }
+      } 
+    },
+    { 
+      name: 'webkit', 
+      use: { 
+        mcpBrowser: 'webkit',
+        video: {
+          mode: 'retain-on-failure',
+          size: { width: 1280, height: 720 }
+        }
+      } 
+    },
+    { 
+      name: 'chromium-extension', 
+      use: { 
+        mcpBrowser: 'chromium', 
+        mcpMode: 'extension',
+        video: {
+          mode: 'retain-on-failure',
+          size: { width: 1280, height: 720 }
+        }
+      } 
+    },
   ],
 });
