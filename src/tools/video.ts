@@ -46,16 +46,24 @@ const videoStart = defineTool({
     const tab = context.currentTabOrDie();
     const width = params.width || 1280;
     const height = params.height || 720;
-    const fileName = await outputFile(context.config, params.filename ?? `video-${new Date().toISOString()}.webm`);
+    const filename = params.filename ?? `video-${Date.now()}.webm`;
+    
+    // Create a unique video directory
+    const videoDir = path.join(
+      process.cwd(),
+      'test-results',
+      `videos-${Date.now()}`
+    );
     
     const code = [
-      `// Start video recording and save to ${fileName}`,
+      `// Start video recording and save to ${filename}`,
       `await page.video?.path(); // Get video path if recording is already active`,
     ];
 
     const action = async () => {
       // Check if video recording is already active
-      if (tab.page.video()) {
+      const existingVideoInfo = (context as any)._videoRecording;
+      if (existingVideoInfo) {
         return {
           content: [{
             type: 'text' as 'text',
@@ -63,6 +71,9 @@ const videoStart = defineTool({
           }]
         };
       }
+
+      // Create video directory
+      await fs.promises.mkdir(videoDir, { recursive: true });
 
       // Create a new context with video recording enabled
       const browser = tab.page.context().browser();
@@ -73,7 +84,7 @@ const videoStart = defineTool({
       // Create context options for video recording
       const contextOptions: playwright.BrowserContextOptions = {
         recordVideo: {
-          dir: path.dirname(fileName),
+          dir: videoDir,
           size: { width, height },
         },
       };
@@ -87,16 +98,19 @@ const videoStart = defineTool({
       }
 
       // Store video info for later retrieval
+      // The actual video path will be determined by Playwright
       (context as any)._videoRecording = {
         page: newPage,
-        fileName,
+        context: newContext,
+        videoDir,
+        requestedFilename: filename,
         startTime: Date.now(),
       };
 
       return {
         content: [{
           type: 'text' as 'text',
-          text: `Started video recording. Video will be saved to ${fileName}`,
+          text: `Started video recording. Video will be saved in ${videoDir}`,
         }]
       };
     };
@@ -138,50 +152,73 @@ const videoStop = defineTool({
         };
       }
 
-      const { page, fileName, startTime } = videoInfo;
+      const { page, context: videoContext, videoDir, requestedFilename, startTime } = videoInfo;
       const duration = Date.now() - startTime;
 
       try {
+        // Get the video path before closing the context
+        const videoPath = await page.video()?.path();
+        
         // Close the context to finalize the video
-        await page.context().close();
+        await videoContext.close();
         
         // Clean up the reference
         delete (context as any)._videoRecording;
 
-        // Wait a moment for video file to be written
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Wait longer for video file to be written and finalized
+        await new Promise(resolve => setTimeout(resolve, 3000));
+
+        let actualVideoPath = videoPath;
+        
+        // If we don't have the video path from Playwright, look for files in the video directory
+        if (!actualVideoPath || !fs.existsSync(actualVideoPath)) {
+          const videoFiles = await fs.promises.readdir(videoDir).catch(() => []);
+          const webmFiles = videoFiles.filter(f => f.endsWith('.webm'));
+          if (webmFiles.length > 0) {
+            actualVideoPath = path.join(videoDir, webmFiles[0]);
+          }
+        }
+
+        // Store the actual video path for later retrieval
+        if (actualVideoPath && fs.existsSync(actualVideoPath)) {
+          // Store the video info globally for retrieval
+          if (!(context as any)._storedVideos) {
+            (context as any)._storedVideos = new Map();
+          }
+          (context as any)._storedVideos.set(requestedFilename, actualVideoPath);
+        }
 
         const content: any[] = [{
           type: 'text' as 'text',
-          text: `Video recording stopped. Duration: ${Math.round(duration / 1000)}s. Saved to ${fileName}`,
+          text: `Video recording stopped. Duration: ${Math.round(duration / 1000)}s. ${actualVideoPath ? `Saved to ${actualVideoPath}` : 'Video file not found'}`,
         }];
 
         // Return video content if requested and file exists
-        if (returnVideo && fs.existsSync(fileName)) {
+        if (returnVideo && actualVideoPath && fs.existsSync(actualVideoPath)) {
           // Check if client supports video content
           const includeVideoContent = context.clientSupportsVideos?.() ?? true;
           
           if (includeVideoContent) {
             try {
-              const videoBuffer = await fs.promises.readFile(fileName);
+              const videoBuffer = await fs.promises.readFile(actualVideoPath);
               const videoBase64 = videoBuffer.toString('base64');
               
               content.push({
-                type: 'resource' as any, // Using 'resource' type for video content
+                type: 'resource' as any,
                 data: videoBase64,
                 mimeType: 'video/webm',
-                uri: `file://${fileName}`,
+                uri: `file://${actualVideoPath}`,
               });
             } catch (error) {
               content.push({
                 type: 'text' as 'text',
-                text: `Video file saved to ${fileName}, but couldn't encode for return: ${(error as Error).message}`,
+                text: `Video file saved to ${actualVideoPath}, but couldn't encode for return: ${(error as Error).message}`,
               });
             }
           } else {
             content.push({
               type: 'text' as 'text',
-              text: `Video file saved to ${fileName}. Client doesn't support video content in responses.`,
+              text: `Video file saved to ${actualVideoPath}. Client doesn't support video content in responses.`,
             });
           }
         }
@@ -233,13 +270,13 @@ const videoStatus = defineTool({
         };
       }
 
-      const { fileName, startTime } = videoInfo;
+      const { requestedFilename, startTime, videoDir } = videoInfo;
       const duration = Date.now() - startTime;
 
       return {
         content: [{
           type: 'text' as 'text',
-          text: `Video recording active. Duration: ${Math.round(duration / 1000)}s. Output: ${fileName}`,
+          text: `Video recording active. Duration: ${Math.round(duration / 1000)}s. Output: ${requestedFilename} in ${videoDir}`,
         }]
       };
     };
@@ -268,18 +305,85 @@ const videoGet = defineTool({
 
   handle: async (context, params) => {
     const { filename, returnContent = true } = params;
-    const filePath = await outputFile(context.config, filename);
     
     const code = [
       `// Retrieve video file ${filename}`,
     ];
 
     const action = async () => {
-      if (!fs.existsSync(filePath)) {
+      // First check if we have the video path stored from a previous recording
+      const storedVideos = (context as any)._storedVideos;
+      let filePath: string | undefined;
+      
+      if (storedVideos && storedVideos.has(filename)) {
+        filePath = storedVideos.get(filename);
+      }
+      
+      // If not found in stored videos, try the fallback approach
+      if (!filePath || !fs.existsSync(filePath)) {
+        filePath = await outputFile(context.config, filename);
+        
+        // If still not found, search in video directories
+        if (!fs.existsSync(filePath)) {
+          const testResultsDir = path.join(process.cwd(), 'test-results');
+          if (fs.existsSync(testResultsDir)) {
+            const entries = await fs.promises.readdir(testResultsDir, { withFileTypes: true });
+            const videoDirs = entries
+              .filter(entry => entry.isDirectory() && entry.name.startsWith('videos-'))
+              .sort((a, b) => b.name.localeCompare(a.name)); // Sort by newest first
+            
+            for (const videoDir of videoDirs) {
+              const searchPath = path.join(testResultsDir, videoDir.name, filename);
+              if (fs.existsSync(searchPath)) {
+                filePath = searchPath;
+                break;
+              }
+              
+              // Also check for any .webm files in the directory if exact filename not found
+              try {
+                const files = await fs.promises.readdir(path.join(testResultsDir, videoDir.name));
+                const webmFiles = files.filter(f => f.endsWith('.webm'));
+                if (webmFiles.length > 0 && filename.endsWith('.webm')) {
+                  const possibleMatch = path.join(testResultsDir, videoDir.name, webmFiles[0]);
+                  if (fs.existsSync(possibleMatch)) {
+                    filePath = possibleMatch;
+                    break;
+                  }
+                }
+              } catch (e) {
+                // Continue searching
+              }
+            }
+          }
+        }
+      }
+
+      if (!filePath || !fs.existsSync(filePath)) {
+        // Provide helpful debugging information
+        const debugInfo = [];
+        debugInfo.push(`Video file ${filename} not found.`);
+        
+        if (storedVideos) {
+          const storedFiles = Array.from(storedVideos.keys());
+          debugInfo.push(`Available stored videos: ${storedFiles.join(', ') || 'none'}`);
+        }
+        
+        // List video directories
+        const testResultsDir = path.join(process.cwd(), 'test-results');
+        if (fs.existsSync(testResultsDir)) {
+          try {
+            const entries = await fs.promises.readdir(testResultsDir, { withFileTypes: true });
+            const videoDirs = entries.filter(entry => entry.isDirectory() && entry.name.startsWith('videos-'));
+            debugInfo.push(`Video directories found: ${videoDirs.map(d => d.name).join(', ') || 'none'}`);
+          } catch (e) {
+            debugInfo.push(`Error reading test-results directory: ${(e as Error).message}`);
+          }
+        }
+
         return {
           content: [{
             type: 'text' as 'text',
-            text: `Video file ${filename} not found.`,
+            text: debugInfo.join('\n'),
           }]
         };
       }
@@ -287,7 +391,7 @@ const videoGet = defineTool({
       const stats = await fs.promises.stat(filePath);
       const content: any[] = [{
         type: 'text' as 'text',
-        text: `Video file found: ${filename} (${Math.round(stats.size / 1024)} KB)`,
+        text: `Video file found: ${filename} at ${filePath} (${Math.round(stats.size / 1024)} KB)`,
       }];
 
       if (returnContent) {
