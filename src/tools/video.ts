@@ -16,6 +16,8 @@
 
 import fs from 'fs';
 import path from 'path';
+import process from 'node:process';
+import { Buffer } from 'node:buffer';
 import { z } from 'zod';
 import { defineTool } from './tool.js';
 import { outputFile } from '../config.js';
@@ -48,13 +50,6 @@ const videoStart = defineTool({
     const height = params.height || 720;
     const filename = params.filename ?? `video-${Date.now()}.webm`;
     
-    // Create a unique video directory
-    const videoDir = path.join(
-      process.cwd(),
-      'test-results',
-      `videos-${Date.now()}`
-    );
-    
     const code = [
       `// Start video recording and save to ${filename}`,
       `await page.video?.path(); // Get video path if recording is already active`,
@@ -72,45 +67,78 @@ const videoStart = defineTool({
         };
       }
 
-      // Create video directory
-      await fs.promises.mkdir(videoDir, { recursive: true });
-
-      // Create a new context with video recording enabled
       const browser = tab.page.context().browser();
       if (!browser) {
         throw new Error('Browser not available for video recording');
       }
 
-      // Create context options for video recording
-      const contextOptions: playwright.BrowserContextOptions = {
-        recordVideo: {
-          dir: videoDir,
-          size: { width, height },
-        },
-      };
-
-      const newContext = await browser.newContext(contextOptions);
-      const newPage = await newContext.newPage();
+      // Check browser configuration first
+      const browserConfig = (context as any).config?.browser;
+      const isCdpEndpoint = !!browserConfig?.cdpEndpoint;
       
-      // Navigate to current URL if available
-      if (tab.page.url() !== 'about:blank') {
-        await newPage.goto(tab.page.url());
+      if (isCdpEndpoint) {
+        // For CDP endpoints (like Browserless), use their custom recording API
+        try {
+          const cdpSession = await tab.page.context().newCDPSession(tab.page);
+          await (cdpSession as any).send('Browserless.startRecording');
+          
+          // Store recording info for Browserless
+          (context as any)._videoRecording = {
+            page: tab.page,
+            context: tab.page.context(),
+            cdpSession,
+            requestedFilename: filename,
+            startTime: Date.now(),
+            usingBrowserless: true,
+            usingExistingContext: true,
+          };
+
+          return {
+            content: [{
+              type: 'text' as 'text',
+              text: `Started Browserless video recording. Video will be saved as ${filename}`,
+            }]
+          };
+        } catch (error) {
+          return {
+            content: [{
+              type: 'text' as 'text',
+              text: `Browserless recording failed: ${(error as Error).message}. Make sure to add 'record=true' to your CDP connection URL.`,
+            }]
+          };
+        }
       }
 
-      // Store video info for later retrieval
-      // The actual video path will be determined by Playwright
-      (context as any)._videoRecording = {
-        page: newPage,
-        context: newContext,
-        videoDir,
-        requestedFilename: filename,
-        startTime: Date.now(),
-      };
+      // For non-CDP endpoints, check if video recording is available on current context
+      const currentContext = tab.page.context();
+      const contextOptions = (context as any).config?.browser?.contextOptions;
+      
+      // Simple check: if --video-mode was enabled, video recording should be available
+      if (contextOptions?.recordVideo) {
+        // Video recording is enabled - use the existing context
+        (context as any)._videoRecording = {
+          page: tab.page,
+          context: currentContext,
+          videoDir: null, // Will be determined when we stop recording
+          requestedFilename: filename,
+          startTime: Date.now(),
+          usingExistingContext: true,
+          hasVideoRecording: true,
+        };
 
+        return {
+          content: [{
+            type: 'text' as 'text',
+            text: `Video recording started using existing context. Video will be saved as ${filename}`,
+          }]
+        };
+      }
+
+      // Video recording was not enabled at startup
       return {
         content: [{
           type: 'text' as 'text',
-          text: `Started video recording. Video will be saved in ${videoDir}`,
+          text: `Video recording not available. Please restart with --video-mode flag:\n\nExample: node cli.js --video-mode=on\n\nThis enables video recording on the browser context from startup.`,
         }]
       };
     };
@@ -152,32 +180,70 @@ const videoStop = defineTool({
         };
       }
 
-      const { page, context: videoContext, videoDir, requestedFilename, startTime } = videoInfo;
+      const { page, context: videoContext, videoDir, requestedFilename, startTime, usingExistingContext, usingBrowserless, cdpSession } = videoInfo;
       const duration = Date.now() - startTime;
 
       try {
-        // Get the video path before closing the context
-        const videoPath = await page.video()?.path();
+        let actualVideoPath: string | undefined;
         
-        // Close the context to finalize the video
-        await videoContext.close();
+        if (usingBrowserless && cdpSession) {
+          // Handle Browserless recording
+          const response = await (cdpSession as any).send('Browserless.stopRecording');
+          const videoBuffer = Buffer.from(response.value, 'binary');
+          
+          // Create a temporary directory for the video
+          const tempVideoDir = path.join(
+            process.cwd(),
+            'test-results',
+            `videos-${Date.now()}`
+          );
+          await fs.promises.mkdir(tempVideoDir, { recursive: true });
+          actualVideoPath = path.join(tempVideoDir, requestedFilename);
+          
+          // Save the video file
+          await fs.promises.writeFile(actualVideoPath, videoBuffer);
+          
+          // Clean up CDP session
+          await cdpSession.detach();
+        } else {
+          // Handle standard Playwright recording
+          // NOTE: We never close contexts anymore since we only use existing contexts
+          // This prevents the "browser started twice" issue
+          
+          try {
+            // Get the video path from the page
+            const videoObj = page.video();
+            if (videoObj) {
+              actualVideoPath = await videoObj.path();
+            }
+          } catch (e) {
+            // Video might not be available yet
+          }
+          
+          // Wait for video file to be finalized
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          
+          // Try to get video path again if we didn't get it before
+          if (!actualVideoPath) {
+            try {
+              const videoObj = page.video();
+              if (videoObj) {
+                actualVideoPath = await videoObj.path();
+              }
+            } catch (e) {
+              // Still no video available
+            }
+          }
+          
+          // If we still don't have a video path, check if file exists at the path we got
+          if (actualVideoPath && !fs.existsSync(actualVideoPath)) {
+            // Wait a bit more for the file to be written
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+        }
         
         // Clean up the reference
         delete (context as any)._videoRecording;
-
-        // Wait longer for video file to be written and finalized
-        await new Promise(resolve => setTimeout(resolve, 3000));
-
-        let actualVideoPath = videoPath;
-        
-        // If we don't have the video path from Playwright, look for files in the video directory
-        if (!actualVideoPath || !fs.existsSync(actualVideoPath)) {
-          const videoFiles = await fs.promises.readdir(videoDir).catch(() => []);
-          const webmFiles = videoFiles.filter(f => f.endsWith('.webm'));
-          if (webmFiles.length > 0) {
-            actualVideoPath = path.join(videoDir, webmFiles[0]);
-          }
-        }
 
         // Store the actual video path for later retrieval
         if (actualVideoPath && fs.existsSync(actualVideoPath)) {
