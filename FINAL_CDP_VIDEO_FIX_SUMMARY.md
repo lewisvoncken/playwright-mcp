@@ -33,7 +33,7 @@ if (isCdpEndpoint) {
 |----------------|----------------------|------------------|
 | **Browserless CDP** | `Browserless.startRecording` via CDP | ✅ Uses existing context only |
 | **Regular CDP + --video-mode** | Standard Playwright video API | ✅ Uses existing context only |
-| **Non-CDP (isolated/persistent)** | Creates new context with video | ✅ Can create contexts when needed |
+| **Non-CDP (isolated/persistent)** | Uses existing context only | ✅ Requires --video-mode at startup |
 
 ## 🚀 **Correct Usage Examples**
 
@@ -51,16 +51,18 @@ node cli.js --cdp-endpoint=http://localhost:9222 --video-mode=on
 
 ### **✅ Non-CDP Standard Usage**
 ```bash
-# Standard usage (creates contexts as needed)
+# Standard usage (MUST enable video recording at startup)
 node cli.js --isolated --video-mode=on
+# OR
+node cli.js --video-mode=on
 ```
 
 ## 🛡️ **What the Fix Prevents**
 
-1. **❌ No More Double Browsers**: Video tools never create additional browser instances
-2. **❌ No Context Conflicts**: Respects CDP endpoint requirements about using existing contexts
-3. **❌ No Silent Failures**: Clear error messages guide users to correct configuration
-4. **❌ No Resource Waste**: Eliminates unnecessary browser contexts and processes
+1. **❌ No More Double Browsers**: Video tools NEVER create any new browser contexts
+2. **❌ No Context Conflicts**: All scenarios use existing contexts only
+3. **❌ No Silent Failures**: Clear error messages guide users to restart with --video-mode
+4. **❌ No Resource Waste**: Zero unnecessary browser contexts or processes
 
 ## 🔍 **Technical Details**
 
@@ -91,8 +93,12 @@ if (existingVideoPath) {
   // 2. Use existing recording capability
   // Store existing context info
 } else {
-  // 3. Create new context with video recording (only for non-CDP)
-  const newContext = await browser.newContext(contextOptions);
+  // 3. Guide user to restart with --video-mode (never create new contexts)
+  return {
+    content: [{
+      text: `Video recording not available. Restart with --video-mode flag to enable.`
+    }]
+  };
 }
 ```
 
@@ -114,8 +120,8 @@ if (existingVideoPath) {
 - **New**: Uses existing context, enable with `--video-mode` ✅
 
 ### **For Standard Users:**
-- **Old**: Worked but could create unnecessary contexts
-- **New**: Smart detection prevents unnecessary context creation ✅
+- **Old**: Created new contexts for video recording (caused double browsers)
+- **New**: Must enable --video-mode at startup, uses existing context only ✅
 
 ## 🎉 **Final Result**
 

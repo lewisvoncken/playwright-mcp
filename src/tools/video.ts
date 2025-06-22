@@ -109,13 +109,12 @@ const videoStart = defineTool({
         }
       }
 
-      // Check if standard Playwright video recording is enabled
+      // Check if standard Playwright video recording is enabled on the current context
       const currentContext = tab.page.context();
       const existingVideoPath = await tab.page.video()?.path().catch(() => null);
       
       if (existingVideoPath) {
-        // Video recording is already enabled on the current context (likely from config)
-        // Store the existing recording info for consistency
+        // Video recording is already enabled on the current context
         (context as any)._videoRecording = {
           page: tab.page,
           context: currentContext,
@@ -133,56 +132,12 @@ const videoStart = defineTool({
         };
       }
 
-      // Only create new contexts for non-CDP scenarios (regular isolated or persistent modes)
-      // Create a unique video directory
-      const videoDir = path.join(
-        process.cwd(),
-        'test-results',
-        `videos-${Date.now()}`
-      );
-
-      // Create video directory
-      await fs.promises.mkdir(videoDir, { recursive: true });
-
-      // Create context options for video recording
-      const contextOptions: playwright.BrowserContextOptions = {
-        recordVideo: {
-          dir: videoDir,
-          size: { width, height },
-        },
-      };
-
-      // Copy existing context options to maintain consistency
-      const existingOptions = currentContext.pages()[0] ? {
-        viewport: currentContext.pages()[0].viewportSize(),
-        userAgent: await currentContext.pages()[0].evaluate(() => navigator.userAgent).catch(() => undefined),
-      } : {};
-
-      const newContext = await browser.newContext({
-        ...existingOptions,
-        ...contextOptions,
-      });
-      const newPage = await newContext.newPage();
-      
-      // Navigate to current URL if available
-      if (tab.page.url() !== 'about:blank') {
-        await newPage.goto(tab.page.url());
-      }
-
-      // Store video info for later retrieval
-      (context as any)._videoRecording = {
-        page: newPage,
-        context: newContext,
-        videoDir,
-        requestedFilename: filename,
-        startTime: Date.now(),
-        usingExistingContext: false,
-      };
-
+      // Video recording is not enabled on the current context
+      // Instead of creating a new context, guide the user to enable it properly
       return {
         content: [{
           type: 'text' as 'text',
-          text: `Started video recording in new context. Video will be saved in ${videoDir}`,
+          text: `Video recording not available on current context. To enable video recording, restart with --video-mode flag:\n\nExample: node cli.js --video-mode=on\n\nThis ensures video recording captures your actual browser interactions instead of an empty context.`,
         }]
       };
     };
@@ -253,10 +208,8 @@ const videoStop = defineTool({
           // Handle standard Playwright recording
           const videoPath = await page.video()?.path();
           
-          // Only close the context if we created it specifically for video recording
-          if (!usingExistingContext) {
-            await videoContext.close();
-          }
+          // NOTE: We never close contexts anymore since we only use existing contexts
+          // This prevents the "browser started twice" issue
           
           // Wait longer for video file to be written and finalized
           await new Promise(resolve => setTimeout(resolve, 3000));
@@ -265,10 +218,12 @@ const videoStop = defineTool({
           
           // If we don't have the video path from Playwright, look for files in the video directory
           if (!actualVideoPath || !fs.existsSync(actualVideoPath)) {
-            const videoFiles = await fs.promises.readdir(videoDir).catch(() => []);
-            const webmFiles = videoFiles.filter((f: string) => f.endsWith('.webm'));
-            if (webmFiles.length > 0) {
-              actualVideoPath = path.join(videoDir, webmFiles[0]);
+            if (videoDir && fs.existsSync(videoDir)) {
+              const videoFiles = await fs.promises.readdir(videoDir).catch(() => []);
+              const webmFiles = videoFiles.filter((f: string) => f.endsWith('.webm'));
+              if (webmFiles.length > 0) {
+                actualVideoPath = path.join(videoDir, webmFiles[0]);
+              }
             }
           }
         }
