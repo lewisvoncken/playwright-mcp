@@ -287,6 +287,20 @@ const videoStop = defineTool({
               text: `Video file saved to ${actualVideoPath}. Client doesn't support video content in responses.`,
             });
           }
+        } else {
+          // Debug information for why base64 content wasn't included
+          const debugInfo = [];
+          debugInfo.push(`DEBUG: Base64 content not included because:`);
+          debugInfo.push(`- returnVideo: ${returnVideo}`);
+          debugInfo.push(`- actualVideoPath: ${actualVideoPath || 'undefined'}`);
+          debugInfo.push(`- file exists: ${actualVideoPath ? fs.existsSync(actualVideoPath) : 'N/A'}`);
+          debugInfo.push(`- clientSupportsVideos: ${context.clientSupportsVideos?.() ?? 'undefined'}`);
+          debugInfo.push(`- videoResponses config: ${context.config.videoResponses || 'undefined'}`);
+          
+          content.push({
+            type: 'text' as 'text',
+            text: debugInfo.join('\n'),
+          });
         }
 
         return { content };
@@ -481,9 +495,18 @@ const videoGet = defineTool({
             });
           }
         } else {
+          // Debug information for why base64 content wasn't included
+          const debugInfo = [];
+          debugInfo.push(`DEBUG: Base64 content not included because:`);
+          debugInfo.push(`- returnContent: ${returnContent}`);
+          debugInfo.push(`- filePath: ${filePath || 'undefined'}`);
+          debugInfo.push(`- file exists: ${filePath ? fs.existsSync(filePath) : 'N/A'}`);
+          debugInfo.push(`- clientSupportsVideos: ${context.clientSupportsVideos?.() ?? 'undefined'}`);
+          debugInfo.push(`- videoResponses config: ${context.config.videoResponses || 'undefined'}`);
+          
           content.push({
             type: 'text' as 'text',
-            text: `Video file available at: ${filePath}. Client doesn't support video content in responses.`,
+            text: `Video file available at: ${filePath}. Client doesn't support video content in responses.\n\n${debugInfo.join('\n')}`,
           });
         }
       }
