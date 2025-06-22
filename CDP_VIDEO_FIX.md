@@ -4,7 +4,7 @@
 
 This document describes the fixes implemented to address two critical issues:
 
-1. **Browser record not working with CDP endpoint variant**
+1. **Browser record not working with CDP endpoint variant (especially Browserless)**
 2. **Browser being started twice, resulting in incorrect recordings**
 
 ## Issues Identified
@@ -31,12 +31,39 @@ This document describes the fixes implemented to address two critical issues:
 
 ## Solutions Implemented
 
-### 1. Smart Context Detection
+### 1. Browserless-Specific Recording Support
 
-Modified `src/tools/video.ts` to intelligently detect existing video recording capabilities:
+Modified `src/tools/video.ts` to support Browserless's custom CDP recording API:
 
 ```typescript
-// Check if the current context already has video recording enabled
+if (isCdpEndpoint) {
+  // For CDP endpoints (like Browserless), use their custom recording API
+  try {
+    const cdpSession = await tab.page.context().newCDPSession(tab.page);
+    await (cdpSession as any).send('Browserless.startRecording');
+    
+    // Store recording info for Browserless
+    (context as any)._videoRecording = {
+      page: tab.page,
+      context: tab.page.context(),
+      cdpSession,
+      requestedFilename: filename,
+      startTime: Date.now(),
+      usingBrowserless: true,
+      usingExistingContext: true,
+    };
+  } catch (error) {
+    // Guide user to add 'record=true' to connection URL
+  }
+}
+```
+
+### 2. Smart Context Detection for Standard Playwright
+
+For non-CDP scenarios, intelligently detect existing video recording capabilities:
+
+```typescript
+// Check if standard Playwright video recording is enabled
 const currentContext = tab.page.context();
 const existingVideoPath = await tab.page.video()?.path().catch(() => null);
 
@@ -50,13 +77,12 @@ if (existingVideoPath) {
     startTime: Date.now(),
     usingExistingContext: true,
   };
-  // ...
 }
 ```
 
-### 2. CDP Endpoint Compatibility Check
+### 3. Complete CDP Context Creation Prevention
 
-Added logic to prevent creating new contexts when using CDP endpoints:
+Eliminated all new context creation for CDP endpoints to prevent multiple browsers:
 
 ```typescript
 // Check browser configuration to determine if we should create new contexts
@@ -74,14 +100,23 @@ if (isCdpEndpoint) {
 }
 ```
 
-### 3. Conditional Context Cleanup
+### 4. Conditional Context Cleanup and Browserless Stop Logic
 
-Modified the video stop logic to only close contexts that were specifically created for video recording:
+Modified the video stop logic to handle both Browserless and standard Playwright recording:
 
 ```typescript
-// Only close the context if we created it specifically for video recording
-if (!usingExistingContext) {
-  await videoContext.close();
+if (usingBrowserless && cdpSession) {
+  // Handle Browserless recording
+  const response = await (cdpSession as any).send('Browserless.stopRecording');
+  const videoBuffer = Buffer.from(response.value, 'binary');
+  // Save video file directly
+  await fs.promises.writeFile(actualVideoPath, videoBuffer);
+} else {
+  // Handle standard Playwright recording
+  // Only close the context if we created it specifically for video recording
+  if (!usingExistingContext) {
+    await videoContext.close();
+  }
 }
 ```
 
@@ -104,25 +139,25 @@ const newContext = await browser.newContext({
 
 ## Usage Scenarios
 
-### Scenario 1: CDP with Built-in Video Recording
+### Scenario 1: Browserless with Video Recording
 
-When video recording is enabled at startup:
+When using Browserless with video recording enabled:
 
 ```bash
-# Video recording configured at startup
+# Browserless with recording enabled in connection URL
+node cli.js --cdp-endpoint=wss://production-sfo.browserless.io?token=YOUR_TOKEN&record=true
+```
+
+The video tools will use Browserless's custom CDP recording API automatically.
+
+### Scenario 2: Regular CDP with Video Recording
+
+```bash
+# Regular CDP endpoint with video recording enabled at startup
 node cli.js --cdp-endpoint=http://localhost:9222 --video-mode=on
 ```
 
-The video tools will detect existing recording capability and use it directly.
-
-### Scenario 2: CDP with Video Recording
-
-```bash
-# Enable video recording at startup with CDP endpoint
-node cli.js --cdp-endpoint=http://localhost:9222 --video-mode=on
-```
-
-The video tools will detect and use the existing recording capability.
+The video tools will detect and use the existing standard Playwright recording capability.
 
 ### Scenario 3: CDP without Video Recording
 
@@ -152,13 +187,16 @@ The fixes ensure:
 
 ## Configuration Examples
 
-### Enable video recording with CDP:
+### Enable video recording with different CDP variants:
 
 ```bash
-# Enable video recording at startup (required for CDP endpoints)
+# Browserless (add record=true to connection URL)
+node cli.js --cdp-endpoint="wss://production-sfo.browserless.io?token=YOUR_TOKEN&record=true"
+
+# Regular CDP endpoint (enable at startup)
 node cli.js --cdp-endpoint=http://localhost:9222 --video-mode=on
 
-# Alternative: Configure video recording with size
+# Regular CDP with custom video size
 node cli.js --cdp-endpoint=http://localhost:9222 --video-mode=on --video-size=1920,1080
 ```
 
