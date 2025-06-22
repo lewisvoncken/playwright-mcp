@@ -220,8 +220,8 @@ const videoStop = defineTool({
             // Video might not be available yet
           }
           
-          // Wait for video file to be finalized
-          await new Promise(resolve => setTimeout(resolve, 3000));
+          // Wait longer for Playwright videos to be finalized
+          await new Promise(resolve => setTimeout(resolve, 5000));
           
           // Try to get video path again if we didn't get it before
           if (!actualVideoPath) {
@@ -237,8 +237,27 @@ const videoStop = defineTool({
           
           // If we still don't have a video path, check if file exists at the path we got
           if (actualVideoPath && !fs.existsSync(actualVideoPath)) {
-            // Wait a bit more for the file to be written
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // Wait even longer for the file to be written
+            await new Promise(resolve => setTimeout(resolve, 5000));
+          }
+          
+          // Final attempt to get the video path if we still don't have it
+          if (!actualVideoPath) {
+            try {
+              const videoObj = page.video();
+              if (videoObj) {
+                actualVideoPath = await videoObj.path();
+              }
+            } catch (e) {
+              // Try to close the page to finalize the video
+              try {
+                await page.close();
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                // Page is closed, can't get video path this way anymore
+              } catch (closeError) {
+                // Ignore close errors
+              }
+            }
           }
         }
         
@@ -266,8 +285,43 @@ const videoStop = defineTool({
           
           if (includeVideoContent) {
             try {
+              // Check file size and wait for it to be fully written
+              let fileSize = 0;
+              let attempts = 0;
+              const maxAttempts = 10;
+              
+              while (attempts < maxAttempts) {
+                try {
+                  const stats = await fs.promises.stat(actualVideoPath);
+                  const newSize = stats.size;
+                  
+                  if (newSize > 0 && newSize === fileSize) {
+                    // File size hasn't changed and is > 0, likely complete
+                    break;
+                  }
+                  
+                  fileSize = newSize;
+                  attempts++;
+                  
+                  if (attempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                  }
+                } catch (e) {
+                  attempts++;
+                  if (attempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                  }
+                }
+              }
+              
+              const stats = await fs.promises.stat(actualVideoPath);
               const videoBuffer = await fs.promises.readFile(actualVideoPath);
               const videoBase64 = videoBuffer.toString('base64');
+              
+              content.push({
+                type: 'text' as 'text',
+                text: `DEBUG: Video file stats - Size: ${stats.size} bytes, Base64 length: ${videoBase64.length}`,
+              });
               
               content.push({
                 type: 'resource' as any,
@@ -479,15 +533,29 @@ const videoGet = defineTool({
         
         if (includeVideoContent) {
           try {
-            const videoBuffer = await fs.promises.readFile(filePath);
-            const videoBase64 = videoBuffer.toString('base64');
-            
-            content.push({
-              type: 'resource' as any,
-              data: videoBase64,
-              mimeType: 'video/webm',
-              uri: `file://${filePath}`,
-            });
+            // Check file size and ensure it's not empty
+            const stats = await fs.promises.stat(filePath);
+            if (stats.size === 0) {
+              content.push({
+                type: 'text' as 'text',
+                text: `Video file ${filePath} exists but is empty (0 bytes)`,
+              });
+            } else {
+              const videoBuffer = await fs.promises.readFile(filePath);
+              const videoBase64 = videoBuffer.toString('base64');
+              
+              content.push({
+                type: 'text' as 'text',
+                text: `DEBUG: Video file stats - Size: ${stats.size} bytes, Base64 length: ${videoBase64.length}`,
+              });
+              
+              content.push({
+                type: 'resource' as any,
+                data: videoBase64,
+                mimeType: 'video/webm',
+                uri: `file://${filePath}`,
+              });
+            }
           } catch (error) {
             content.push({
               type: 'text' as 'text',
