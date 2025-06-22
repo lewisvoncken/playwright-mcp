@@ -58,6 +58,7 @@ export type CLIOptions = {
   userDataDir?: string;
   videoMode?: 'off' | 'on' | 'retain-on-failure';
   videoSize?: string;
+  videoResponses?: 'allow' | 'omit' | 'auto';
   viewportSize?: string;
   vision?: boolean;
   extension?: boolean;
@@ -242,6 +243,7 @@ export async function configFromCLIOptions(cliOptions: CLIOptions): Promise<Conf
     saveTrace: cliOptions.saveTrace,
     outputDir: cliOptions.outputDir,
     imageResponses: cliOptions.imageResponses,
+    videoResponses: cliOptions.videoResponses,
   };
 
   return result;

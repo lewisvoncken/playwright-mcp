@@ -61,8 +61,21 @@ export class Context {
   }
 
   clientSupportsVideos(): boolean {
-    // For now, use the same logic as images
-    // Could be extended with a separate videoResponses config option
+    // Check for explicit video responses configuration first
+    if (this.config.videoResponses === 'allow')
+      return true;
+    if (this.config.videoResponses === 'omit')
+      return false;
+    
+    // For video content, be more permissive than images
+    // Videos are often needed for debugging and automation purposes
+    // even in clients that might not display them directly
+    if (this.config.videoResponses === 'auto' || !this.config.videoResponses) {
+      // Always allow videos unless explicitly disabled
+      // The client can choose whether to process the base64 content
+      return true;
+    }
+    
     return this.clientSupportsImages();
   }
 
