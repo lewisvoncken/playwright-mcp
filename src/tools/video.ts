@@ -109,58 +109,17 @@ const videoStart = defineTool({
         }
       }
 
-      // Check if standard Playwright video recording is enabled on the current context
+      // For non-CDP endpoints, check if video recording is available on current context
       const currentContext = tab.page.context();
-      
-      // Debug: Check current configuration
       const contextOptions = (context as any).config?.browser?.contextOptions;
-      const debugInfo = [];
-      debugInfo.push(`Context options recordVideo: ${!!contextOptions?.recordVideo}`);
       
-      // Try to detect video recording capability
-      let existingVideoPath = null;
-      let hasVideoRecording = false;
-      
-      try {
-        // Check if page.video() exists
-        const videoObj = tab.page.video();
-        debugInfo.push(`Page video object exists: ${!!videoObj}`);
-        
-        if (videoObj) {
-          try {
-            existingVideoPath = await videoObj.path();
-            debugInfo.push(`Video path: ${existingVideoPath}`);
-            hasVideoRecording = true;
-          } catch (e) {
-            debugInfo.push(`Video path error: ${(e as Error).message}`);
-            // Video object exists but no path yet (recording might start when we access it)
-            hasVideoRecording = true;
-          }
-        }
-      } catch (e) {
-        debugInfo.push(`Video object error: ${(e as Error).message}`);
-      }
-      
-      // Check if context was created with recordVideo options
-      if (!hasVideoRecording && contextOptions?.recordVideo) {
-        hasVideoRecording = true;
-        debugInfo.push(`Found recordVideo in context options`);
-        // Create a video directory path since we don't have the actual path yet
-        const videosDir = path.join(
-          process.cwd(),
-          'test-results',
-          `videos-${Date.now()}`
-        );
-        await fs.promises.mkdir(videosDir, { recursive: true });
-        existingVideoPath = videosDir;
-      }
-      
-      if (hasVideoRecording) {
-        // Video recording is enabled or available on the current context
+      // Simple check: if --video-mode was enabled, video recording should be available
+      if (contextOptions?.recordVideo) {
+        // Video recording is enabled - use the existing context
         (context as any)._videoRecording = {
           page: tab.page,
           context: currentContext,
-          videoDir: existingVideoPath ? (existingVideoPath.endsWith('.webm') ? path.dirname(existingVideoPath) : existingVideoPath) : undefined,
+          videoDir: null, // Will be determined when we stop recording
           requestedFilename: filename,
           startTime: Date.now(),
           usingExistingContext: true,
@@ -170,17 +129,16 @@ const videoStart = defineTool({
         return {
           content: [{
             type: 'text' as 'text',
-            text: `Video recording started using existing context. Video will be saved as ${filename}\n\nDebug info: ${debugInfo.join(', ')}`,
+            text: `Video recording started using existing context. Video will be saved as ${filename}`,
           }]
         };
       }
 
-      // Video recording is not enabled on the current context
-      // Show debug info to help troubleshoot
+      // Video recording was not enabled at startup
       return {
         content: [{
           type: 'text' as 'text',
-          text: `Video recording not available on current context.\n\nDebug info: ${debugInfo.join(', ')}\n\nTo enable video recording, restart with --video-mode flag:\nExample: node cli.js --video-mode=on\n\nThis ensures video recording captures your actual browser interactions.`,
+          text: `Video recording not available. Please restart with --video-mode flag:\n\nExample: node cli.js --video-mode=on\n\nThis enables video recording on the browser context from startup.`,
         }]
       };
     };
@@ -214,15 +172,10 @@ const videoStop = defineTool({
 
     const action = async () => {
       if (!videoInfo) {
-        // Debug: Check what's actually stored in the context
-        const allKeys = Object.keys(context as any).filter(key => key.startsWith('_'));
-        const hasStoredVideos = !!(context as any)._storedVideos;
-        const debugInfo = `Context keys: ${allKeys.join(', ')}, Stored videos: ${hasStoredVideos}`;
-        
         return {
           content: [{
             type: 'text' as 'text',
-            text: `No active video recording found. Start recording first with browser_video_start.\n\nDebug info: ${debugInfo}`,
+            text: `No active video recording found. Start recording first with browser_video_start.`,
           }]
         };
       }
@@ -254,38 +207,38 @@ const videoStop = defineTool({
           await cdpSession.detach();
         } else {
           // Handle standard Playwright recording
-          let videoPath = await page.video()?.path().catch(() => null);
-          
           // NOTE: We never close contexts anymore since we only use existing contexts
           // This prevents the "browser started twice" issue
           
-          // Wait longer for video file to be written and finalized
-          await new Promise(resolve => setTimeout(resolve, 3000));
-
-          actualVideoPath = videoPath;
+          try {
+            // Get the video path from the page
+            const videoObj = page.video();
+            if (videoObj) {
+              actualVideoPath = await videoObj.path();
+            }
+          } catch (e) {
+            // Video might not be available yet
+          }
           
-          // If we don't have the video path from Playwright, look for files in the video directory
-          if (!actualVideoPath || !fs.existsSync(actualVideoPath)) {
-            if (videoDir && fs.existsSync(videoDir)) {
-              const videoFiles = await fs.promises.readdir(videoDir).catch(() => []);
-              const webmFiles = videoFiles.filter((f: string) => f.endsWith('.webm'));
-              if (webmFiles.length > 0) {
-                actualVideoPath = path.join(videoDir, webmFiles[0]);
+          // Wait for video file to be finalized
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          
+          // Try to get video path again if we didn't get it before
+          if (!actualVideoPath) {
+            try {
+              const videoObj = page.video();
+              if (videoObj) {
+                actualVideoPath = await videoObj.path();
               }
+            } catch (e) {
+              // Still no video available
             }
           }
           
-          // If we still don't have a video path but we know recording was enabled,
-          // try to get it again from the page after the wait
-          if (!actualVideoPath && videoInfo.hasVideoRecording) {
-            try {
-              videoPath = await page.video()?.path().catch(() => null);
-              if (videoPath && fs.existsSync(videoPath)) {
-                actualVideoPath = videoPath;
-              }
-            } catch (e) {
-              // Still no video path available
-            }
+          // If we still don't have a video path, check if file exists at the path we got
+          if (actualVideoPath && !fs.existsSync(actualVideoPath)) {
+            // Wait a bit more for the file to be written
+            await new Promise(resolve => setTimeout(resolve, 2000));
           }
         }
         
