@@ -56,20 +56,19 @@ if (existingVideoPath) {
 
 ### 2. CDP Endpoint Compatibility Check
 
-Added logic to prevent creating new contexts when using non-isolated CDP endpoints:
+Added logic to prevent creating new contexts when using CDP endpoints:
 
 ```typescript
-// Check if we can enable video recording on a new context
+// Check browser configuration to determine if we should create new contexts
 const browserConfig = (context as any).config?.browser;
 const isCdpEndpoint = !!browserConfig?.cdpEndpoint;
-const isIsolated = !!browserConfig?.isolated;
 
-if (isCdpEndpoint && !isIsolated) {
-  // Provide helpful error message instead of failing silently
+// For CDP endpoints, avoid creating new contexts completely
+if (isCdpEndpoint) {
   return {
     content: [{
       type: 'text' as 'text',
-      text: `Video recording not available with CDP endpoint in non-isolated mode. Enable video recording at startup using --video-mode or use --isolated flag.`,
+      text: `Video recording not available with CDP endpoint. Enable video recording at startup using --video-mode flag to record from the existing browser context.`,
     }]
   };
 }
@@ -116,23 +115,23 @@ node cli.js --cdp-endpoint=http://localhost:9222 --video-mode=on
 
 The video tools will detect existing recording capability and use it directly.
 
-### Scenario 2: CDP with Isolated Mode
+### Scenario 2: CDP with Video Recording
 
 ```bash
-# Isolated mode allows new contexts for video recording
-node cli.js --cdp-endpoint=http://localhost:9222 --isolated
-```
-
-The video tools can create dedicated contexts for recording when needed.
-
-### Scenario 3: Non-isolated CDP
-
-```bash
-# Non-isolated CDP - video recording must be enabled at startup
+# Enable video recording at startup with CDP endpoint
 node cli.js --cdp-endpoint=http://localhost:9222 --video-mode=on
 ```
 
-The tools will inform users to enable video recording at startup or use `--isolated` flag.
+The video tools will detect and use the existing recording capability.
+
+### Scenario 3: CDP without Video Recording
+
+```bash
+# CDP without video recording - tools will provide guidance
+node cli.js --cdp-endpoint=http://localhost:9222
+```
+
+The tools will inform users to enable video recording at startup using `--video-mode`.
 
 ## Benefits
 
@@ -156,11 +155,11 @@ The fixes ensure:
 ### Enable video recording with CDP:
 
 ```bash
-# Method 1: Enable at startup
+# Enable video recording at startup (required for CDP endpoints)
 node cli.js --cdp-endpoint=http://localhost:9222 --video-mode=on
 
-# Method 2: Use isolated mode for runtime video control
-node cli.js --cdp-endpoint=http://localhost:9222 --isolated
+# Alternative: Configure video recording with size
+node cli.js --cdp-endpoint=http://localhost:9222 --video-mode=on --video-size=1920,1080
 ```
 
 ### Context options with video recording:

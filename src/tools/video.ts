@@ -95,22 +95,22 @@ const videoStart = defineTool({
         };
       }
 
-      // Check if we can enable video recording on a new context
-      // For CDP endpoints, we should avoid creating new contexts unless isolated mode is enabled
+      // Check browser configuration to determine if we should create new contexts
       const browserConfig = (context as any).config?.browser;
       const isCdpEndpoint = !!browserConfig?.cdpEndpoint;
       const isIsolated = !!browserConfig?.isolated;
 
-      if (isCdpEndpoint && !isIsolated) {
-        // For non-isolated CDP connections, we can't create new contexts for video recording
+      // For CDP endpoints, avoid creating new contexts as much as possible
+      if (isCdpEndpoint) {
         return {
           content: [{
             type: 'text' as 'text',
-            text: `Video recording not available with CDP endpoint in non-isolated mode. Enable video recording at startup using --video-mode or use --isolated flag.`,
+            text: `Video recording not available with CDP endpoint. Enable video recording at startup using --video-mode flag to record from the existing browser context.`,
           }]
         };
       }
 
+      // Only create new contexts for non-CDP scenarios (regular isolated or persistent modes)
       // Create a unique video directory
       const videoDir = path.join(
         process.cwd(),
