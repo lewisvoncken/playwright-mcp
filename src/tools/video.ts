@@ -16,6 +16,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import process from 'node:process';
 import { z } from 'zod';
 import { defineTool } from './tool.js';
 import { outputFile } from '../config.js';
@@ -48,13 +49,6 @@ const videoStart = defineTool({
     const height = params.height || 720;
     const filename = params.filename ?? `video-${Date.now()}.webm`;
     
-    // Create a unique video directory
-    const videoDir = path.join(
-      process.cwd(),
-      'test-results',
-      `videos-${Date.now()}`
-    );
-    
     const code = [
       `// Start video recording and save to ${filename}`,
       `await page.video?.path(); // Get video path if recording is already active`,
@@ -72,14 +66,60 @@ const videoStart = defineTool({
         };
       }
 
-      // Create video directory
-      await fs.promises.mkdir(videoDir, { recursive: true });
-
-      // Create a new context with video recording enabled
       const browser = tab.page.context().browser();
       if (!browser) {
         throw new Error('Browser not available for video recording');
       }
+
+      // Check if the current context already has video recording enabled
+      const currentContext = tab.page.context();
+      const existingVideoPath = await tab.page.video()?.path().catch(() => null);
+      
+      if (existingVideoPath) {
+        // Video recording is already enabled on the current context (likely from config)
+        // Store the existing recording info for consistency
+        (context as any)._videoRecording = {
+          page: tab.page,
+          context: currentContext,
+          videoDir: path.dirname(existingVideoPath),
+          requestedFilename: filename,
+          startTime: Date.now(),
+          usingExistingContext: true,
+        };
+
+        return {
+          content: [{
+            type: 'text' as 'text',
+            text: `Video recording started using existing context. Video will be saved as ${filename}`,
+          }]
+        };
+      }
+
+      // Check if we can enable video recording on a new context
+      // For CDP endpoints, we should avoid creating new contexts unless isolated mode is enabled
+      const browserConfig = (context as any).config?.browser;
+      const isCdpEndpoint = !!browserConfig?.cdpEndpoint;
+      const isIsolated = !!browserConfig?.isolated;
+
+      if (isCdpEndpoint && !isIsolated) {
+        // For non-isolated CDP connections, we can't create new contexts for video recording
+        return {
+          content: [{
+            type: 'text' as 'text',
+            text: `Video recording not available with CDP endpoint in non-isolated mode. Enable video recording at startup using --video-mode or use --isolated flag.`,
+          }]
+        };
+      }
+
+      // Create a unique video directory
+      const videoDir = path.join(
+        process.cwd(),
+        'test-results',
+        `videos-${Date.now()}`
+      );
+
+      // Create video directory
+      await fs.promises.mkdir(videoDir, { recursive: true });
 
       // Create context options for video recording
       const contextOptions: playwright.BrowserContextOptions = {
@@ -89,7 +129,16 @@ const videoStart = defineTool({
         },
       };
 
-      const newContext = await browser.newContext(contextOptions);
+      // Copy existing context options to maintain consistency
+      const existingOptions = currentContext.pages()[0] ? {
+        viewport: currentContext.pages()[0].viewportSize(),
+        userAgent: await currentContext.pages()[0].evaluate(() => navigator.userAgent).catch(() => undefined),
+      } : {};
+
+      const newContext = await browser.newContext({
+        ...existingOptions,
+        ...contextOptions,
+      });
       const newPage = await newContext.newPage();
       
       // Navigate to current URL if available
@@ -98,19 +147,19 @@ const videoStart = defineTool({
       }
 
       // Store video info for later retrieval
-      // The actual video path will be determined by Playwright
       (context as any)._videoRecording = {
         page: newPage,
         context: newContext,
         videoDir,
         requestedFilename: filename,
         startTime: Date.now(),
+        usingExistingContext: false,
       };
 
       return {
         content: [{
           type: 'text' as 'text',
-          text: `Started video recording. Video will be saved in ${videoDir}`,
+          text: `Started video recording in new context. Video will be saved in ${videoDir}`,
         }]
       };
     };
@@ -152,15 +201,17 @@ const videoStop = defineTool({
         };
       }
 
-      const { page, context: videoContext, videoDir, requestedFilename, startTime } = videoInfo;
+      const { page, context: videoContext, videoDir, requestedFilename, startTime, usingExistingContext } = videoInfo;
       const duration = Date.now() - startTime;
 
       try {
-        // Get the video path before closing the context
+        // Get the video path before potentially closing the context
         const videoPath = await page.video()?.path();
         
-        // Close the context to finalize the video
-        await videoContext.close();
+        // Only close the context if we created it specifically for video recording
+        if (!usingExistingContext) {
+          await videoContext.close();
+        }
         
         // Clean up the reference
         delete (context as any)._videoRecording;
