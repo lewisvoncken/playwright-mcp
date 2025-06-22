@@ -56,6 +56,8 @@ export type CLIOptions = {
   storageState?: string;
   userAgent?: string;
   userDataDir?: string;
+  videoMode?: 'off' | 'on' | 'retain-on-failure';
+  videoSize?: string;
   viewportSize?: string;
   vision?: boolean;
   extension?: boolean;
@@ -187,6 +189,34 @@ export async function configFromCLIOptions(cliOptions: CLIOptions): Promise<Conf
 
   if (cliOptions.blockServiceWorkers)
     contextOptions.serviceWorkers = 'block';
+
+  // Video recording configuration
+  if (cliOptions.videoMode) {
+    if (cliOptions.videoMode === 'off') {
+      contextOptions.recordVideo = undefined;
+    } else {
+      // For 'on' and 'retain-on-failure' modes, we enable recording
+      // The mode will be handled by the video recording logic in browser context factory
+      contextOptions.recordVideo = {
+        dir: '', // Will be set dynamically in browser context factory
+        size: { width: 1280, height: 720 }, // Default size
+      };
+      
+      if (cliOptions.videoSize) {
+        try {
+          const [width, height] = cliOptions.videoSize.split(',').map(n => +n);
+          if (isNaN(width) || isNaN(height))
+            throw new Error('bad values');
+          contextOptions.recordVideo.size = { width, height };
+        } catch (e) {
+          throw new Error('Invalid video size format: use "width,height", for example --video-size="1920,1080"');
+        }
+      }
+      
+      // Store the mode for later use
+      (contextOptions.recordVideo as any).mode = cliOptions.videoMode;
+    }
+  }
 
   const result: Config = {
     browser: {

@@ -60,6 +60,12 @@ export class Context {
     return !this.clientVersion?.name.includes('cursor');
   }
 
+  clientSupportsVideos(): boolean {
+    // For now, use the same logic as images
+    // Could be extended with a separate videoResponses config option
+    return this.clientSupportsImages();
+  }
+
   modalStates(): ModalState[] {
     return this._modalStates;
   }

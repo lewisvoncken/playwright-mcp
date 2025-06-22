@@ -51,6 +51,8 @@ program
     .option('--storage-state <path>', 'path to the storage state file for isolated sessions.')
     .option('--user-agent <ua string>', 'specify user agent string')
     .option('--user-data-dir <path>', 'path to the user data directory. If not specified, a temporary directory will be created.')
+    .option('--video-mode <mode>', 'video recording mode: "off", "on", or "retain-on-failure". Default is "retain-on-failure".')
+    .option('--video-size <size>', 'video recording size in pixels, for example "1920,1080". Default is "1280,720".')
     .option('--viewport-size <size>', 'specify browser viewport size in pixels, for example "1280, 720"')
     .option('--vision', 'Run server that uses screenshots (Aria snapshots are used by default)')
     .addOption(new Option('--extension', 'Allow connecting to a running browser instance (Edge/Chrome only). Requires the \'Playwright MCP\' browser extension to be installed.').hideHelp())
