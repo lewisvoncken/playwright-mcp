@@ -32,6 +32,7 @@ const videoStartSchema = z.object({
 
 const videoStopSchema = z.object({
   returnVideo: z.boolean().optional().describe('Whether to return the video content in the response. Default is true.'),
+  forceBase64: z.boolean().optional().describe('Force aggressive video finalization and always return base64 content. Will wait longer for video to be ready. Default is false.'),
 });
 
 const videoStart = defineTool({
@@ -165,9 +166,10 @@ const videoStop = defineTool({
   handle: async (context, params) => {
     const videoInfo = (context as any)._videoRecording;
     const returnVideo = params.returnVideo !== false; // Default to true
+    const forceBase64 = params.forceBase64 === true; // Default to false
     
     const code = [
-      `// Stop video recording and ${returnVideo ? 'return video content' : 'save to file'}`,
+      `// Stop video recording and ${returnVideo ? 'return video content' : 'save to file'}${forceBase64 ? ' (forced base64)' : ''}`,
     ];
 
     const action = async () => {
@@ -220,8 +222,9 @@ const videoStop = defineTool({
             // Video might not be available yet
           }
           
-          // Wait for video file to be finalized
-          await new Promise(resolve => setTimeout(resolve, 3000));
+          // Wait for Playwright videos to be finalized (longer if forcing base64)
+          const baseWait = forceBase64 ? 8000 : 5000;
+          await new Promise(resolve => setTimeout(resolve, baseWait));
           
           // Try to get video path again if we didn't get it before
           if (!actualVideoPath) {
@@ -237,8 +240,37 @@ const videoStop = defineTool({
           
           // If we still don't have a video path, check if file exists at the path we got
           if (actualVideoPath && !fs.existsSync(actualVideoPath)) {
-            // Wait a bit more for the file to be written
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // Wait even longer for the file to be written (extra long if forcing base64)
+            const fileWait = forceBase64 ? 10000 : 5000;
+            await new Promise(resolve => setTimeout(resolve, fileWait));
+          }
+          
+          // Final attempt to get the video path if we still don't have it
+          if (!actualVideoPath) {
+            try {
+              const videoObj = page.video();
+              if (videoObj) {
+                actualVideoPath = await videoObj.path();
+              }
+            } catch (e) {
+              // Still no video available
+            }
+          }
+          
+          // If forceBase64 is true, try more aggressive video finalization
+          if (forceBase64 && !actualVideoPath) {
+            try {
+              // Try navigating to about:blank to force video finalization
+              await page.goto('about:blank');
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              
+              const videoObj = page.video();
+              if (videoObj) {
+                actualVideoPath = await videoObj.path();
+              }
+            } catch (e) {
+              // Ignore navigation errors
+            }
           }
         }
         
@@ -259,22 +291,69 @@ const videoStop = defineTool({
           text: `Video recording stopped. Duration: ${Math.round(duration / 1000)}s. ${actualVideoPath ? `Saved to ${actualVideoPath}` : 'Video file not found'}`,
         }];
 
-        // Return video content if requested and file exists
-        if (returnVideo && actualVideoPath && fs.existsSync(actualVideoPath)) {
-          // Check if client supports video content
-          const includeVideoContent = context.clientSupportsVideos?.() ?? true;
+        // Return video content if requested and file exists (or force if forceBase64)
+        if ((returnVideo && actualVideoPath && fs.existsSync(actualVideoPath)) || (forceBase64 && actualVideoPath)) {
+          // Check if client supports video content (or override with forceBase64)
+          const includeVideoContent = forceBase64 || (context.clientSupportsVideos?.() ?? true);
           
           if (includeVideoContent) {
             try {
-              const videoBuffer = await fs.promises.readFile(actualVideoPath);
-              const videoBase64 = videoBuffer.toString('base64');
+              // Check file size and wait for it to be fully written (more aggressive if forcing)
+              let fileSize = 0;
+              let attempts = 0;
+              const maxAttempts = forceBase64 ? 20 : 10;
+              const waitInterval = forceBase64 ? 1500 : 1000;
               
-              content.push({
-                type: 'resource' as any,
-                data: videoBase64,
-                mimeType: 'video/webm',
-                uri: `file://${actualVideoPath}`,
-              });
+              while (attempts < maxAttempts) {
+                try {
+                  const stats = await fs.promises.stat(actualVideoPath);
+                  const newSize = stats.size;
+                  
+                  if (newSize > 0 && newSize === fileSize) {
+                    // File size hasn't changed and is > 0, likely complete
+                    break;
+                  }
+                  
+                  fileSize = newSize;
+                  attempts++;
+                  
+                  if (attempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, waitInterval));
+                  }
+                } catch (e) {
+                  attempts++;
+                  if (attempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, waitInterval));
+                  }
+                }
+              }
+              
+              const stats = await fs.promises.stat(actualVideoPath);
+              
+              // If forceBase64 is true, try to read the file even if it's small
+              if (forceBase64 || stats.size > 0) {
+                const videoBuffer = await fs.promises.readFile(actualVideoPath);
+                const videoBase64 = videoBuffer.toString('base64');
+                
+                if (forceBase64) {
+                  content.push({
+                    type: 'text' as 'text',
+                    text: `DEBUG: Forced base64 return - Size: ${stats.size} bytes, Base64 length: ${videoBase64.length}`,
+                  });
+                }
+                
+                content.push({
+                  type: 'resource' as any,
+                  data: videoBase64,
+                  mimeType: 'video/webm',
+                  uri: `file://${actualVideoPath}`,
+                });
+              } else {
+                content.push({
+                  type: 'text' as 'text',
+                  text: `Video file ${actualVideoPath} exists but is empty (${stats.size} bytes). Use forceBase64: true to force return anyway.`,
+                });
+              }
             } catch (error) {
               content.push({
                 type: 'text' as 'text',
@@ -287,6 +366,17 @@ const videoStop = defineTool({
               text: `Video file saved to ${actualVideoPath}. Client doesn't support video content in responses.`,
             });
           }
+        } else {
+          const message = !actualVideoPath 
+            ? `Video file not found or could not be created.`
+            : !fs.existsSync(actualVideoPath)
+            ? `Video file path exists but file not accessible: ${actualVideoPath}`
+            : `Video file not returned. Use forceBase64: true to force base64 return.`;
+          
+          content.push({
+            type: 'text' as 'text',
+            text: message,
+          });
         }
 
         return { content };
@@ -365,12 +455,13 @@ const videoGet = defineTool({
     inputSchema: z.object({
       filename: z.string().describe('Name of the video file to retrieve.'),
       returnContent: z.boolean().optional().describe('Whether to return video content in response. Default is true.'),
+      forceBase64: z.boolean().optional().describe('Force return of base64 content even if file appears small or client detection suggests otherwise. Default is false.'),
     }),
     type: 'readOnly',
   },
 
   handle: async (context, params) => {
-    const { filename, returnContent = true } = params;
+    const { filename, returnContent = true, forceBase64 = false } = params;
     
     const code = [
       `// Retrieve video file ${filename}`,
@@ -461,19 +552,35 @@ const videoGet = defineTool({
       }];
 
       if (returnContent) {
-        const includeVideoContent = context.clientSupportsVideos?.() ?? true;
+        const includeVideoContent = forceBase64 || (context.clientSupportsVideos?.() ?? true);
         
         if (includeVideoContent) {
           try {
-            const videoBuffer = await fs.promises.readFile(filePath);
-            const videoBase64 = videoBuffer.toString('base64');
-            
-            content.push({
-              type: 'resource' as any,
-              data: videoBase64,
-              mimeType: 'video/webm',
-              uri: `file://${filePath}`,
-            });
+            // Check file size and ensure it's not empty (or force if forceBase64)
+            const stats = await fs.promises.stat(filePath);
+            if (stats.size === 0 && !forceBase64) {
+              content.push({
+                type: 'text' as 'text',
+                text: `Video file ${filePath} exists but is empty (0 bytes). Use forceBase64: true to force return anyway.`,
+              });
+            } else {
+              const videoBuffer = await fs.promises.readFile(filePath);
+              const videoBase64 = videoBuffer.toString('base64');
+              
+              if (forceBase64) {
+                content.push({
+                  type: 'text' as 'text',
+                  text: `DEBUG: Forced base64 return - Size: ${stats.size} bytes, Base64 length: ${videoBase64.length}`,
+                });
+              }
+              
+              content.push({
+                type: 'resource' as any,
+                data: videoBase64,
+                mimeType: 'video/webm',
+                uri: `file://${filePath}`,
+              });
+            }
           } catch (error) {
             content.push({
               type: 'text' as 'text',
@@ -483,7 +590,7 @@ const videoGet = defineTool({
         } else {
           content.push({
             type: 'text' as 'text',
-            text: `Video file available at: ${filePath}. Client doesn't support video content in responses.`,
+            text: `Video file available at: ${filePath}. Content not returned. Use forceBase64: true to force base64 return.`,
           });
         }
       }
