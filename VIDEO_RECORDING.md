@@ -32,17 +32,32 @@ Start recording a video of browser interactions.
 ```
 
 ### `browser_video_stop`
-Stop the current video recording and optionally return the video content.
+Stop the current video recording and optionally return the video information.
 
 **Parameters:**
-- `returnVideo` (optional): Whether to include video content in response (default: true)
+- `returnVideo` (optional): Whether to return video URL/path in response (default: true)
+- `returnBase64` (optional): Whether to return base64 content directly (can be large, default: false)
+- `forceBase64` (optional): Force base64 encoding with extended validation (default: false)
+- `maxWaitSeconds` (optional): Maximum seconds to wait for video finalization (default: 30)
 
-**Example:**
+**Example (Default - Returns URL):**
 ```json
 {
   "name": "browser_video_stop",
   "arguments": {
     "returnVideo": true
+  }
+}
+```
+
+**Example (Request Base64):**
+```json
+{
+  "name": "browser_video_stop",
+  "arguments": {
+    "returnVideo": true,
+    "returnBase64": true,
+    "maxWaitSeconds": 45
   }
 }
 ```
@@ -57,20 +72,35 @@ Check if video recording is currently active and get recording details.
 }
 ```
 
-### `browser_video_get` (Fixed! 🔧)
-Retrieve a previously recorded video file with improved reliability.
+### `browser_video_get` (Enhanced! ⚡)
+Retrieve a previously recorded video file efficiently via URL or base64.
 
 **Parameters:**
 - `filename`: Name of the video file to retrieve
-- `returnContent` (optional): Whether to include video content in response (default: true)
+- `returnContent` (optional): Whether to return video URL/path in response (default: true)
+- `returnBase64` (optional): Whether to return base64 content directly (can be large, default: false)
+- `forceBase64` (optional): Force base64 encoding even for problematic files (default: false)
+- `maxWaitSeconds` (optional): Maximum seconds to wait for file readiness (default: 10)
 
-**Example:**
+**Example (Default - Returns URL):**
 ```json
 {
   "name": "browser_video_get",
   "arguments": {
     "filename": "my-test-session.webm",
     "returnContent": true
+  }
+}
+```
+
+**Example (Request Base64):**
+```json
+{
+  "name": "browser_video_get",
+  "arguments": {
+    "filename": "my-test-session.webm",
+    "returnContent": true,
+    "returnBase64": true
   }
 }
 ```
@@ -99,26 +129,62 @@ await client.callTool({
   arguments: { selector: 'button[type="submit"]' }
 });
 
-// 3. Stop recording and get video
+// 3. Stop recording and get video URL (fast, efficient)
 const result = await client.callTool({
   name: 'browser_video_stop',
   arguments: { returnVideo: true }
 });
 
-// Video is now available in result.content as base64
+// Video URL is now available in result.content[1].uri
+const videoUrl = result.content[1].uri; // file:///path/to/video.webm
 
-// 4. Or retrieve later by filename
+// 4. Or retrieve video URL later by filename
 const video = await client.callTool({
   name: 'browser_video_get',
   arguments: { filename: 'user-interaction.webm' }
 });
+
+// 5. If you need base64 data (optional, larger response)
+const videoWithBase64 = await client.callTool({
+  name: 'browser_video_stop',
+  arguments: { 
+    returnVideo: true, 
+    returnBase64: true 
+  }
+});
+// Base64 data available in videoWithBase64.content[1].data
 ```
 
 ## 🎬 **Video Content in MCP Responses**
 
-### Direct Video Return
+### Default Response: Video URLs (Fast & Efficient)
 
-Videos are returned as base64-encoded content in MCP responses:
+By default, videos are returned as file URLs for efficient access:
+
+```json
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "Video recording stopped. Duration: 30s. Saved to /path/to/video.webm"
+    },
+    {
+      "type": "text", 
+      "text": "Video available at: /path/to/video.webm (2,347 KB)"
+    },
+    {
+      "type": "resource",
+      "uri": "file:///path/to/video.webm",
+      "mimeType": "video/webm",
+      "text": "Video file: video.webm"
+    }
+  ]
+}
+```
+
+### Base64 Response (When Explicitly Requested)
+
+Base64-encoded content is returned only when `returnBase64: true`:
 
 ```json
 {
