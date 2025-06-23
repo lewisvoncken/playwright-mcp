@@ -136,7 +136,7 @@ const result = await client.callTool({
 });
 
 // Video URL is now available in result.content[1].uri
-const videoUrl = result.content[1].uri; // file:///path/to/video.webm
+const videoUrl = result.content[1].uri; // http://localhost:3000/videos/user-interaction.webm
 
 // 4. Or retrieve video URL later by filename
 const video = await client.callTool({
@@ -157,9 +157,9 @@ const videoWithBase64 = await client.callTool({
 
 ## 🎬 **Video Content in MCP Responses**
 
-### Default Response: Video URLs (Fast & Efficient)
+### Default Response: HTTP Video URLs (Fast & Accessible)
 
-By default, videos are returned as file URLs for efficient access:
+By default, videos are returned as HTTP URLs for universal access:
 
 ```json
 {
@@ -170,11 +170,11 @@ By default, videos are returned as file URLs for efficient access:
     },
     {
       "type": "text", 
-      "text": "Video available at: /path/to/video.webm (2,347 KB)"
+      "text": "Video available at: http://localhost:3000/videos/video.webm (2,347 KB)"
     },
     {
       "type": "resource",
-      "uri": "file:///path/to/video.webm",
+      "uri": "http://localhost:3000/videos/video.webm",
       "mimeType": "video/webm",
       "text": "Video file: video.webm"
     }

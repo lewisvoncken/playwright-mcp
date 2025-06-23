@@ -426,11 +426,16 @@ const videoStop = defineTool({
                     });
                   }
                   
+                  // Generate HTTP URL for the video file
+                  const filename = path.basename(actualVideoPath);
+                  const serverUrl = (context as any).server?._httpServerUrl;
+                  const videoUrl = serverUrl ? `${serverUrl}/videos/${filename}` : `file://${actualVideoPath}`;
+                  
                   content.push({
                     type: 'resource' as any,
                     data: videoResult.base64,
                     mimeType: 'video/webm',
-                    uri: `file://${actualVideoPath}`,
+                    uri: videoUrl,
                   });
                 } else {
                   content.push({
@@ -451,18 +456,24 @@ const videoStop = defineTool({
               });
             }
           } else {
-            // Return video URL/path by default (much more efficient)
+            // Return video HTTP URL by default (much more efficient)
             const stats = await fs.promises.stat(actualVideoPath);
+            const filename = path.basename(actualVideoPath);
+            
+            // Generate HTTP URL for the video file
+            const serverUrl = (context as any).server?._httpServerUrl;
+            const videoUrl = serverUrl ? `${serverUrl}/videos/${filename}` : `file://${actualVideoPath}`;
+            
             content.push({
               type: 'text' as 'text',
-              text: `Video available at: ${actualVideoPath} (${Math.round(stats.size / 1024)} KB)`,
+              text: `Video available at: ${videoUrl} (${Math.round(stats.size / 1024)} KB)`,
             });
             
             content.push({
               type: 'resource' as any,
-              uri: `file://${actualVideoPath}`,
+              uri: videoUrl,
               mimeType: 'video/webm',
-              text: `Video file: ${path.basename(actualVideoPath)}`,
+              text: `Video file: ${filename}`,
             });
           }
         } else {
@@ -671,12 +682,17 @@ const videoGet = defineTool({
                 });
               }
               
-              content.push({
-                type: 'resource' as any,
-                data: videoResult.base64,
-                mimeType: 'video/webm',
-                uri: `file://${filePath}`,
-              });
+                          // Generate HTTP URL for the video file
+            const filename = path.basename(filePath);
+            const serverUrl = (context as any).server?._httpServerUrl;
+            const videoUrl = serverUrl ? `${serverUrl}/videos/${filename}` : `file://${filePath}`;
+            
+            content.push({
+              type: 'resource' as any,
+              data: videoResult.base64,
+              mimeType: 'video/webm',
+              uri: videoUrl,
+            });
             } else {
               content.push({
                 type: 'text' as 'text',
@@ -690,12 +706,18 @@ const videoGet = defineTool({
             });
           }
         } else {
-          // Return video URL/path by default (much more efficient)
+          // Return video HTTP URL by default (much more efficient)
+          const filename = path.basename(filePath);
+          
+          // Generate HTTP URL for the video file
+          const serverUrl = (context as any).server?._httpServerUrl;
+          const videoUrl = serverUrl ? `${serverUrl}/videos/${filename}` : `file://${filePath}`;
+          
           content.push({
             type: 'resource' as any,
-            uri: `file://${filePath}`,
+            uri: videoUrl,
             mimeType: 'video/webm',
-            text: `Video file: ${path.basename(filePath)}`,
+            text: `Video file: ${filename}`,
           });
         }
       }

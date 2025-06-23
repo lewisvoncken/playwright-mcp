@@ -11,7 +11,7 @@
 ## 🚀 **What Changed**
 
 ### ✅ **Default Behavior (New)**
-Videos now return efficient file URLs instead of large base64 data:
+Videos now return accessible HTTP URLs instead of large base64 data:
 
 ```json
 {
@@ -19,14 +19,14 @@ Videos now return efficient file URLs instead of large base64 data:
   "arguments": { "returnVideo": true }
 }
 
-// Response (fast, lightweight):
+// Response (fast, accessible):
 {
   "content": [
     { "type": "text", "text": "Video recording stopped. Duration: 15s. Saved to /path/video.webm" },
-    { "type": "text", "text": "Video available at: /path/video.webm (2,347 KB)" },
+    { "type": "text", "text": "Video available at: http://localhost:3000/videos/video.webm (2,347 KB)" },
     { 
       "type": "resource",
-      "uri": "file:///path/to/video.webm",
+      "uri": "http://localhost:3000/videos/video.webm",
       "mimeType": "video/webm",
       "text": "Video file: video.webm"
     }
@@ -125,9 +125,9 @@ Just add `returnBase64: true`:
 const result = await callTool('browser_video_stop', { returnVideo: true });
 const base64Data = result.content[1].data; // This was base64
 
-// After: Get file URL (much faster)
+// After: Get HTTP URL (much faster and accessible)
 const result = await callTool('browser_video_stop', { returnVideo: true });
-const videoUrl = result.content[1].uri; // Now a file:// URL
+const videoUrl = result.content[1].uri; // Now an HTTP URL: http://localhost:3000/videos/video.webm
 
 // If you still need base64:
 const result = await callTool('browser_video_stop', { 
@@ -162,14 +162,14 @@ const base64Data = result.content[1].data; // Complete base64 when requested
 ## 🎯 **Summary**
 
 **Problem**: Base64 video data was incomplete/truncated
-**Solution**: Return file URLs by default, base64 only when requested
+**Solution**: Return HTTP URLs by default, base64 only when requested
 **Result**: 
 - ✅ No more incomplete videos
 - ✅ Much faster responses  
-- ✅ More reliable operation
-- ✅ Better performance
+- ✅ Universally accessible URLs
+- ✅ Better performance with streaming support
 - ✅ Maintained backward compatibility
 
-**Your original issue is completely resolved!** Videos are now returned as efficient URLs that always work, with base64 encoding available as an opt-in feature when you specifically need it.
+**Your original issue is completely resolved!** Videos are now returned as HTTP URLs that work from anywhere, with base64 encoding available as an opt-in feature when you specifically need it.
 
-The video recording system now provides the best of both worlds: fast, reliable URLs by default, with complete base64 data available when explicitly requested! 🎉
+The video recording system now provides the best of both worlds: fast, accessible HTTP URLs by default, with complete base64 data available when explicitly requested! 🎉
