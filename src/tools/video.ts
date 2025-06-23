@@ -24,6 +24,55 @@ import { outputFile } from '../config.js';
 
 import type * as playwright from 'playwright';
 
+// Helper functions for Browserless detection
+function isBrowserlessEndpoint(cdpEndpoint: string): boolean {
+  if (!cdpEndpoint) return false;
+  
+  try {
+    const url = new URL(cdpEndpoint);
+    // Check for common Browserless domains and patterns
+    return url.hostname.includes('browserless') || 
+           url.hostname.includes('chrome.browserless') ||
+           url.pathname.includes('/browserless') ||
+           url.searchParams.has('token'); // Browserless often uses tokens
+  } catch {
+    return false;
+  }
+}
+
+function hasRecordingEnabled(cdpEndpoint: string): boolean {
+  try {
+    const url = new URL(cdpEndpoint);
+    return url.searchParams.get('record') === 'true';
+  } catch {
+    return false;
+  }
+}
+
+// Feature detection for Browserless capabilities
+async function detectBrowserlessCapabilities(cdpSession: any): Promise<{
+  supportsRecording: boolean;
+  supportedCommands: string[];
+}> {
+  try {
+    // Try to get Browserless capabilities
+    const capabilities = await cdpSession.send('Browserless.getCapabilities').catch(() => null);
+    
+    if (capabilities) {
+      return {
+        supportsRecording: capabilities.recording === true,
+        supportedCommands: capabilities.commands || []
+      };
+    }
+    
+    // Fallback: just assume recording is supported for Browserless endpoints
+    // We'll handle errors during actual recording
+    return { supportsRecording: true, supportedCommands: ['recording'] };
+  } catch {
+    return { supportsRecording: false, supportedCommands: [] };
+  }
+}
+
 const videoStartSchema = z.object({
   filename: z.string().optional().describe('File name to save the video to. Defaults to `video-{timestamp}.webm` if not specified.'),
   width: z.number().optional().describe('Video width in pixels. Default is 1280.'),
@@ -78,33 +127,104 @@ const videoStart = defineTool({
       const isCdpEndpoint = !!browserConfig?.cdpEndpoint;
       
       if (isCdpEndpoint) {
-        // For CDP endpoints (like Browserless), use their custom recording API
-        try {
-          const cdpSession = await tab.page.context().newCDPSession(tab.page);
-          await (cdpSession as any).send('Browserless.startRecording');
+        const cdpEndpoint = browserConfig.cdpEndpoint;
+        const isBrowserless = isBrowserlessEndpoint(cdpEndpoint);
+        const hasRecording = hasRecordingEnabled(cdpEndpoint);
+        
+        if (isBrowserless) {
+          // Handle Browserless endpoints
+          if (!hasRecording) {
+            return {
+              content: [{
+                type: 'text' as 'text',
+                text: `Browserless endpoint detected but recording not enabled. Add 'record=true' to your CDP URL:\n\nExample: wss://production-sfo.browserless.io?token=YOUR_TOKEN&record=true`,
+              }]
+            };
+          }
           
-          // Store recording info for Browserless
+          // Proceed with Browserless recording
+          let cdpSession: any;
+          try {
+            cdpSession = await tab.page.context().newCDPSession(tab.page);
+            
+            // Detect capabilities first
+            const capabilities = await detectBrowserlessCapabilities(cdpSession);
+            
+            if (!capabilities.supportsRecording) {
+              throw new Error('Browserless endpoint does not support video recording');
+            }
+            
+            // Start recording with timeout
+            await Promise.race([
+              cdpSession.send('Browserless.startRecording'),
+              new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Recording start timeout after 10 seconds')), 10000)
+              )
+            ]);
+            
+            // Store enhanced recording info
+            (context as any)._videoRecording = {
+              page: tab.page,
+              context: tab.page.context(),
+              cdpSession,
+              requestedFilename: filename,
+              startTime: Date.now(),
+              usingBrowserless: true,
+              usingExistingContext: true,
+              capabilities,
+            };
+
+            return {
+              content: [{
+                type: 'text' as 'text',
+                text: `Started Browserless video recording. Video will be saved as ${filename}`,
+              }]
+            };
+          } catch (error) {
+            // Clean up CDP session on error
+            if (cdpSession) {
+              try {
+                await cdpSession.detach();
+              } catch {
+                // Ignore cleanup errors
+              }
+            }
+            
+            return {
+              content: [{
+                type: 'text' as 'text',
+                text: `Browserless recording failed: ${(error as Error).message}\n\nTroubleshooting:\n1. Ensure 'record=true' is in your CDP URL\n2. Check that your Browserless subscription supports video recording\n3. Verify the token has recording permissions`,
+              }]
+            };
+          }
+        } else {
+          // Regular CDP endpoint - check if video recording is enabled
+          const contextOptions = (context as any).config?.browser?.contextOptions;
+          if (!contextOptions?.recordVideo) {
+            return {
+              content: [{
+                type: 'text' as 'text',
+                text: `Regular CDP endpoint detected. To enable video recording, restart with --video-mode flag:\n\nExample: node cli.js --cdp-endpoint=${cdpEndpoint} --video-mode=on`,
+              }]
+            };
+          }
+          
+          // Use existing context with video recording enabled
           (context as any)._videoRecording = {
             page: tab.page,
             context: tab.page.context(),
-            cdpSession,
+            videoDir: null, // Will be determined when we stop recording
             requestedFilename: filename,
             startTime: Date.now(),
-            usingBrowserless: true,
             usingExistingContext: true,
+            hasVideoRecording: true,
+            isCdpEndpoint: true,
           };
 
           return {
             content: [{
               type: 'text' as 'text',
-              text: `Started Browserless video recording. Video will be saved as ${filename}`,
-            }]
-          };
-        } catch (error) {
-          return {
-            content: [{
-              type: 'text' as 'text',
-              text: `Browserless recording failed: ${(error as Error).message}. Make sure to add 'record=true' to your CDP connection URL.`,
+              text: `Video recording started using existing CDP context. Video will be saved as ${filename}`,
             }]
           };
         }
@@ -190,23 +310,71 @@ const videoStop = defineTool({
         
         if (usingBrowserless && cdpSession) {
           // Handle Browserless recording
-          const response = await (cdpSession as any).send('Browserless.stopRecording');
-          const videoBuffer = Buffer.from(response.value, 'binary');
-          
-          // Create a temporary directory for the video
-          const tempVideoDir = path.join(
-            process.cwd(),
-            'test-results',
-            `videos-${Date.now()}`
-          );
-          await fs.promises.mkdir(tempVideoDir, { recursive: true });
-          actualVideoPath = path.join(tempVideoDir, requestedFilename);
-          
-          // Save the video file
-          await fs.promises.writeFile(actualVideoPath, videoBuffer);
-          
-          // Clean up CDP session
-          await cdpSession.detach();
+          try {
+            const response = await (cdpSession as any).send('Browserless.stopRecording');
+            
+            // Handle different response formats from Browserless
+            let videoBuffer: Buffer;
+            if (response.value) {
+              if (typeof response.value === 'string') {
+                // Try base64 first, then binary
+                try {
+                  videoBuffer = Buffer.from(response.value, 'base64');
+                } catch {
+                  videoBuffer = Buffer.from(response.value, 'binary');
+                }
+              } else if (Buffer.isBuffer(response.value)) {
+                videoBuffer = response.value;
+              } else {
+                throw new Error(`Unsupported video data format: ${typeof response.value}`);
+              }
+            } else if (response.data) {
+              videoBuffer = Buffer.from(response.data, 'base64');
+            } else {
+              throw new Error('No video data returned from Browserless');
+            }
+            
+            // Validate video buffer
+            if (videoBuffer.length === 0) {
+              throw new Error('Empty video buffer returned from Browserless');
+            }
+            
+            // Create video directory and save file  
+            const tempVideoDir = path.join(
+              process.cwd(),
+              'test-results',
+              `videos-${Date.now()}`
+            );
+            await fs.promises.mkdir(tempVideoDir, { recursive: true });
+            actualVideoPath = path.join(tempVideoDir, requestedFilename);
+            
+            await fs.promises.writeFile(actualVideoPath, videoBuffer);
+            
+            // Verify file was written successfully
+            const stats = await fs.promises.stat(actualVideoPath);
+            if (stats.size === 0) {
+              throw new Error('Video file was written but is empty');
+            }
+            
+            // Clean up CDP session
+            await cdpSession.detach();
+          } catch (error) {
+            // Clean up CDP session on error
+            if (cdpSession) {
+              try {
+                await cdpSession.detach();
+              } catch {
+                // Ignore cleanup errors
+              }
+            }
+            
+            return {
+              content: [{
+                type: 'text' as 'text',
+                text: `Browserless video recording failed during stop: ${(error as Error).message}\n\nTroubleshooting:\n1. Ensure recording was started successfully\n2. Check network connectivity to Browserless\n3. Verify your Browserless subscription supports video recording`,
+              }]
+            };
+          }
         } else {
           // Handle standard Playwright recording
           // NOTE: We never close contexts anymore since we only use existing contexts
