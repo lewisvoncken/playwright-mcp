@@ -24,10 +24,91 @@ import { outputFile } from '../config.js';
 
 import type * as playwright from 'playwright';
 
+// Helper functions for Browserless detection
+function isBrowserlessEndpoint(cdpEndpoint: string): boolean {
+  if (!cdpEndpoint) return false;
+  
+  try {
+    const url = new URL(cdpEndpoint);
+    // Check for common Browserless domains and patterns
+    return url.hostname.includes('browserless') || 
+           url.hostname.includes('chrome.browserless') ||
+           url.pathname.includes('/browserless') ||
+           url.searchParams.has('token'); // Browserless often uses tokens
+  } catch {
+    return false;
+  }
+}
+
+function hasRecordingEnabled(cdpEndpoint: string): boolean {
+  try {
+    const url = new URL(cdpEndpoint);
+    return url.searchParams.get('record') === 'true';
+  } catch {
+    return false;
+  }
+}
+
+// Feature detection for Browserless capabilities
+async function detectBrowserlessCapabilities(cdpSession: any): Promise<{
+  supportsRecording: boolean;
+  supportedCommands: string[];
+}> {
+  try {
+    // Try to get Browserless capabilities
+    const capabilities = await cdpSession.send('Browserless.getCapabilities').catch(() => null);
+    
+    if (capabilities) {
+      return {
+        supportsRecording: capabilities.recording === true,
+        supportedCommands: capabilities.commands || []
+      };
+    }
+    
+    // Fallback: just assume recording is supported for Browserless endpoints
+    // We'll handle errors during actual recording
+    return { supportsRecording: true, supportedCommands: ['recording'] };
+  } catch {
+    return { supportsRecording: false, supportedCommands: [] };
+  }
+}
+
+// Standard Chrome DevTools Protocol screencast functions
+async function startStandardScreencast(cdpSession: any, options: {
+  format?: 'jpeg' | 'png';
+  quality?: number;
+  maxWidth?: number;
+  maxHeight?: number;
+  everyNthFrame?: number;
+}): Promise<void> {
+  const {
+    format = 'jpeg',
+    quality = 80,
+    maxWidth = 1280,
+    maxHeight = 720,
+    everyNthFrame = 1
+  } = options;
+
+  await cdpSession.send('Page.startScreencast', {
+    format,
+    quality,
+    maxWidth,
+    maxHeight,
+    everyNthFrame
+  });
+}
+
+async function stopStandardScreencast(cdpSession: any): Promise<void> {
+  await cdpSession.send('Page.stopScreencast');
+}
+
 const videoStartSchema = z.object({
   filename: z.string().optional().describe('File name to save the video to. Defaults to `video-{timestamp}.webm` if not specified.'),
   width: z.number().optional().describe('Video width in pixels. Default is 1280.'),
   height: z.number().optional().describe('Video height in pixels. Default is 720.'),
+  useScreencast: z.boolean().optional().describe('For regular CDP endpoints: use Page.startScreencast instead of Browserless recording. Note: Only returns frame data, not a complete video file. Default is false.'),
+  quality: z.number().optional().describe('Video quality for screencasting (1-100). Default is 80.'),
+  format: z.enum(['jpeg', 'png']).optional().describe('Frame format for screencasting. Default is jpeg.'),
 });
 
 const videoStopSchema = z.object({
@@ -50,6 +131,9 @@ const videoStart = defineTool({
     const width = params.width || 1280;
     const height = params.height || 720;
     const filename = params.filename ?? `video-${Date.now()}.webm`;
+    const useScreencast = params.useScreencast || false;
+    const quality = params.quality || 80;
+    const format = params.format || 'jpeg';
     
     const code = [
       `// Start video recording and save to ${filename}`,
@@ -78,35 +162,180 @@ const videoStart = defineTool({
       const isCdpEndpoint = !!browserConfig?.cdpEndpoint;
       
       if (isCdpEndpoint) {
-        // For CDP endpoints (like Browserless), use their custom recording API
-        try {
-          const cdpSession = await tab.page.context().newCDPSession(tab.page);
-          await (cdpSession as any).send('Browserless.startRecording');
+        const cdpEndpoint = browserConfig.cdpEndpoint;
+        const isBrowserless = isBrowserlessEndpoint(cdpEndpoint);
+        const hasRecording = hasRecordingEnabled(cdpEndpoint);
+        
+        if (isBrowserless) {
+          // Handle Browserless endpoints
+          if (!hasRecording) {
+            return {
+              content: [{
+                type: 'text' as 'text',
+                text: `Browserless endpoint detected but recording not enabled. Add 'record=true' to your CDP URL:\n\nExample: wss://production-sfo.browserless.io?token=YOUR_TOKEN&record=true`,
+              }]
+            };
+          }
           
-          // Store recording info for Browserless
-          (context as any)._videoRecording = {
-            page: tab.page,
-            context: tab.page.context(),
-            cdpSession,
-            requestedFilename: filename,
-            startTime: Date.now(),
-            usingBrowserless: true,
-            usingExistingContext: true,
-          };
+          // Proceed with Browserless recording
+          let cdpSession: any;
+          try {
+            cdpSession = await tab.page.context().newCDPSession(tab.page);
+            
+            // Detect capabilities first
+            const capabilities = await detectBrowserlessCapabilities(cdpSession);
+            
+            if (!capabilities.supportsRecording) {
+              throw new Error('Browserless endpoint does not support video recording');
+            }
+            
+            // Start recording with timeout
+            await Promise.race([
+              cdpSession.send('Browserless.startRecording'),
+              new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Recording start timeout after 10 seconds')), 10000)
+              )
+            ]);
+            
+            // Store enhanced recording info
+            (context as any)._videoRecording = {
+              page: tab.page,
+              context: tab.page.context(),
+              cdpSession,
+              requestedFilename: filename,
+              startTime: Date.now(),
+              usingBrowserless: true,
+              usingExistingContext: true,
+              capabilities,
+            };
 
-          return {
-            content: [{
-              type: 'text' as 'text',
-              text: `Started Browserless video recording. Video will be saved as ${filename}`,
-            }]
-          };
-        } catch (error) {
-          return {
-            content: [{
-              type: 'text' as 'text',
-              text: `Browserless recording failed: ${(error as Error).message}. Make sure to add 'record=true' to your CDP connection URL.`,
-            }]
-          };
+            return {
+              content: [{
+                type: 'text' as 'text',
+                text: `Started Browserless video recording. Video will be saved as ${filename}`,
+              }]
+            };
+          } catch (error) {
+            // Clean up CDP session on error
+            if (cdpSession) {
+              try {
+                await cdpSession.detach();
+              } catch {
+                // Ignore cleanup errors
+              }
+            }
+            
+            return {
+              content: [{
+                type: 'text' as 'text',
+                text: `Browserless recording failed: ${(error as Error).message}\n\nTroubleshooting:\n1. Ensure 'record=true' is in your CDP URL\n2. Check that your Browserless subscription supports video recording\n3. Verify the token has recording permissions`,
+              }]
+            };
+          }
+        } else {
+          // Regular CDP endpoint - support both standard recording and screencasting
+          if (useScreencast) {
+            // Use Chrome DevTools Protocol Page.startScreencast
+            let cdpSession: any;
+            try {
+              cdpSession = await tab.page.context().newCDPSession(tab.page);
+              
+              // Start screencast with specified options
+              await startStandardScreencast(cdpSession, {
+                format,
+                quality,
+                maxWidth: width,
+                maxHeight: height,
+                everyNthFrame: 1
+              });
+              
+              // Store screencast recording info
+              (context as any)._videoRecording = {
+                page: tab.page,
+                context: tab.page.context(),
+                cdpSession,
+                requestedFilename: filename,
+                startTime: Date.now(),
+                usingScreencast: true,
+                usingExistingContext: true,
+                frames: [], // Store captured frames
+                format,
+                quality,
+              };
+
+              // Set up frame capture listener
+              cdpSession.on('Page.screencastFrame', (frameData: any) => {
+                const videoInfo = (context as any)._videoRecording;
+                if (videoInfo && videoInfo.frames) {
+                  videoInfo.frames.push({
+                    data: frameData.data,
+                    timestamp: Date.now(),
+                    sessionId: frameData.sessionId
+                  });
+                  
+                  // Acknowledge the frame
+                  cdpSession.send('Page.screencastFrameAck', {
+                    sessionId: frameData.sessionId
+                  }).catch(() => {
+                    // Ignore ack errors
+                  });
+                }
+              });
+
+              return {
+                content: [{
+                  type: 'text' as 'text',
+                  text: `Started Chrome DevTools screencast recording. Video frames will be captured as ${format} format. Use browser_video_stop to compile frames.`,
+                }]
+              };
+            } catch (error) {
+              // Clean up CDP session on error
+              if (cdpSession) {
+                try {
+                  await cdpSession.detach();
+                } catch {
+                  // Ignore cleanup errors
+                }
+              }
+              
+              return {
+                content: [{
+                  type: 'text' as 'text',
+                  text: `Screencast recording failed: ${(error as Error).message}\n\nTry using standard video recording instead by omitting the useScreencast parameter.`,
+                }]
+              };
+            }
+          } else {
+            // Standard video recording approach
+            const contextOptions = (context as any).config?.browser?.contextOptions;
+            if (!contextOptions?.recordVideo) {
+              return {
+                content: [{
+                  type: 'text' as 'text',
+                  text: `Regular CDP endpoint detected. Choose one of these options:\n\n1. Restart with --video-mode flag for full video recording:\n   node cli.js --cdp-endpoint=${cdpEndpoint} --video-mode=on\n\n2. Use screencast mode (captures frames):\n   Set useScreencast: true in your request`,
+                }]
+              };
+            }
+            
+            // Use existing context with video recording enabled
+            (context as any)._videoRecording = {
+              page: tab.page,
+              context: tab.page.context(),
+              videoDir: null, // Will be determined when we stop recording
+              requestedFilename: filename,
+              startTime: Date.now(),
+              usingExistingContext: true,
+              hasVideoRecording: true,
+              isCdpEndpoint: true,
+            };
+
+            return {
+              content: [{
+                type: 'text' as 'text',
+                text: `Video recording started using existing CDP context. Video will be saved as ${filename}`,
+              }]
+            };
+          }
         }
       }
 
@@ -182,7 +411,7 @@ const videoStop = defineTool({
         };
       }
 
-      const { page, context: videoContext, videoDir, requestedFilename, startTime, usingExistingContext, usingBrowserless, cdpSession } = videoInfo;
+      const { page, context: videoContext, videoDir, requestedFilename, startTime, usingExistingContext, usingBrowserless, usingScreencast, cdpSession, frames, format } = videoInfo;
       const duration = Date.now() - startTime;
 
       try {
@@ -190,24 +419,139 @@ const videoStop = defineTool({
         
         if (usingBrowserless && cdpSession) {
           // Handle Browserless recording
-          const response = await (cdpSession as any).send('Browserless.stopRecording');
-          const videoBuffer = Buffer.from(response.value, 'binary');
-          
-          // Create a temporary directory for the video
-          const tempVideoDir = path.join(
-            process.cwd(),
-            'test-results',
-            `videos-${Date.now()}`
-          );
-          await fs.promises.mkdir(tempVideoDir, { recursive: true });
-          actualVideoPath = path.join(tempVideoDir, requestedFilename);
-          
-          // Save the video file
-          await fs.promises.writeFile(actualVideoPath, videoBuffer);
-          
-          // Clean up CDP session
-          await cdpSession.detach();
-        } else {
+          try {
+            const response = await (cdpSession as any).send('Browserless.stopRecording');
+            
+            // Handle different response formats from Browserless
+            let videoBuffer: Buffer;
+            if (response.value) {
+              if (typeof response.value === 'string') {
+                // Try base64 first, then binary
+                try {
+                  videoBuffer = Buffer.from(response.value, 'base64');
+                } catch {
+                  videoBuffer = Buffer.from(response.value, 'binary');
+                }
+              } else if (Buffer.isBuffer(response.value)) {
+                videoBuffer = response.value;
+              } else {
+                throw new Error(`Unsupported video data format: ${typeof response.value}`);
+              }
+            } else if (response.data) {
+              videoBuffer = Buffer.from(response.data, 'base64');
+            } else {
+              throw new Error('No video data returned from Browserless');
+            }
+            
+            // Validate video buffer
+            if (videoBuffer.length === 0) {
+              throw new Error('Empty video buffer returned from Browserless');
+            }
+            
+            // Create video directory and save file  
+            const tempVideoDir = path.join(
+              process.cwd(),
+              'test-results',
+              `videos-${Date.now()}`
+            );
+            await fs.promises.mkdir(tempVideoDir, { recursive: true });
+            actualVideoPath = path.join(tempVideoDir, requestedFilename);
+            
+            await fs.promises.writeFile(actualVideoPath, videoBuffer);
+            
+            // Verify file was written successfully
+            const stats = await fs.promises.stat(actualVideoPath);
+            if (stats.size === 0) {
+              throw new Error('Video file was written but is empty');
+            }
+            
+            // Clean up CDP session
+            await cdpSession.detach();
+          } catch (error) {
+            // Clean up CDP session on error
+            if (cdpSession) {
+              try {
+                await cdpSession.detach();
+              } catch {
+                // Ignore cleanup errors
+              }
+            }
+            
+                         return {
+               content: [{
+                 type: 'text' as 'text',
+                 text: `Browserless video recording failed during stop: ${(error as Error).message}\n\nTroubleshooting:\n1. Ensure recording was started successfully\n2. Check network connectivity to Browserless\n3. Verify your Browserless subscription supports video recording`,
+               }]
+             };
+           }
+         } else if (usingScreencast && cdpSession) {
+           // Handle Chrome DevTools Protocol screencast
+           try {
+             // Stop screencast
+             await stopStandardScreencast(cdpSession);
+             
+             // Process captured frames
+             if (frames && frames.length > 0) {
+               // Create a directory for frames
+               const framesDir = path.join(
+                 process.cwd(),
+                 'test-results',
+                 `screencast-${Date.now()}`
+               );
+               await fs.promises.mkdir(framesDir, { recursive: true });
+               
+               // Save individual frames
+               const frameFiles: string[] = [];
+               for (let i = 0; i < frames.length; i++) {
+                 const frame = frames[i];
+                 const frameFilename = `frame-${String(i).padStart(6, '0')}.${format}`;
+                 const framePath = path.join(framesDir, frameFilename);
+                 
+                 // Decode base64 frame data
+                 const frameBuffer = Buffer.from(frame.data, 'base64');
+                 await fs.promises.writeFile(framePath, frameBuffer);
+                 frameFiles.push(framePath);
+               }
+               
+               actualVideoPath = framesDir;
+               
+               // Create an index file listing all frames
+               const indexPath = path.join(framesDir, 'frames.json');
+               await fs.promises.writeFile(indexPath, JSON.stringify({
+                 frameCount: frames.length,
+                 duration: duration,
+                 format: format,
+                 frames: frameFiles.map((file, index) => ({
+                   filename: path.basename(file),
+                   timestamp: frames[index].timestamp,
+                   index: index
+                 }))
+               }, null, 2));
+               
+             } else {
+               throw new Error('No frames were captured during screencast');
+             }
+             
+             // Clean up CDP session
+             await cdpSession.detach();
+           } catch (error) {
+             // Clean up CDP session on error
+             if (cdpSession) {
+               try {
+                 await cdpSession.detach();
+               } catch {
+                 // Ignore cleanup errors
+               }
+             }
+             
+             return {
+               content: [{
+                 type: 'text' as 'text',
+                 text: `Screencast recording failed during stop: ${(error as Error).message}\n\nTroubleshooting:\n1. Ensure screencast was started successfully\n2. Check that frames were being captured\n3. Try using standard video recording instead`,
+               }]
+             };
+           }
+         } else {
           // Handle standard Playwright recording
           // NOTE: We never close contexts anymore since we only use existing contexts
           // This prevents the "browser started twice" issue
@@ -288,11 +632,14 @@ const videoStop = defineTool({
 
         const content: any[] = [{
           type: 'text' as 'text',
-          text: `Video recording stopped. Duration: ${Math.round(duration / 1000)}s. ${actualVideoPath ? `Saved to ${actualVideoPath}` : 'Video file not found'}`,
+          text: usingScreencast 
+            ? `Screencast recording stopped. Duration: ${Math.round(duration / 1000)}s. Captured ${frames?.length || 0} frames. ${actualVideoPath ? `Saved to ${actualVideoPath}` : 'No frames captured'}`
+            : `Video recording stopped. Duration: ${Math.round(duration / 1000)}s. ${actualVideoPath ? `Saved to ${actualVideoPath}` : 'Video file not found'}`,
         }];
 
         // Return video content if requested and file exists (or force if forceBase64)
-        if ((returnVideo && actualVideoPath && fs.existsSync(actualVideoPath)) || (forceBase64 && actualVideoPath)) {
+        // Note: For screencast mode, we don't return video content since it's individual frames
+        if (!usingScreencast && ((returnVideo && actualVideoPath && fs.existsSync(actualVideoPath)) || (forceBase64 && actualVideoPath))) {
           // Check if client supports video content (or override with forceBase64)
           const includeVideoContent = forceBase64 || (context.clientSupportsVideos?.() ?? true);
           
@@ -364,6 +711,43 @@ const videoStop = defineTool({
             content.push({
               type: 'text' as 'text',
               text: `Video file saved to ${actualVideoPath}. Client doesn't support video content in responses.`,
+            });
+          }
+        } else if (usingScreencast && actualVideoPath && fs.existsSync(path.join(actualVideoPath, 'frames.json'))) {
+          // For screencast mode, provide frame information and optionally return sample frames
+          try {
+            const indexPath = path.join(actualVideoPath, 'frames.json');
+            const frameIndex = JSON.parse(await fs.promises.readFile(indexPath, 'utf-8'));
+            
+            content.push({
+              type: 'text' as 'text',
+              text: `Screencast captured ${frameIndex.frameCount} frames in ${format} format. Frame data saved to: ${actualVideoPath}`,
+            });
+
+            // Optionally return the first frame as a sample
+            if (returnVideo && frameIndex.frames.length > 0) {
+              const firstFramePath = path.join(actualVideoPath, frameIndex.frames[0].filename);
+              if (fs.existsSync(firstFramePath)) {
+                const frameBuffer = await fs.promises.readFile(firstFramePath);
+                const frameBase64 = frameBuffer.toString('base64');
+                
+                content.push({
+                  type: 'resource' as any,
+                  data: frameBase64,
+                  mimeType: `image/${format}`,
+                  uri: `file://${firstFramePath}`,
+                });
+                
+                content.push({
+                  type: 'text' as 'text',
+                  text: `Sample frame (first of ${frameIndex.frameCount}) returned as ${format} image.`,
+                });
+              }
+            }
+          } catch (error) {
+            content.push({
+              type: 'text' as 'text',
+              text: `Screencast frames saved to ${actualVideoPath}, but couldn't read frame index: ${(error as Error).message}`,
             });
           }
         } else {
